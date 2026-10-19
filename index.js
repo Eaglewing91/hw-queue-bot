@@ -1,4 +1,5 @@
 // 💀 The Necromancer: HW Revitalize weapon queue bot for Torn factions (discord.js v14)
+// Author: Eaglewing [571041]
 //
 // Every channel gets its own independent queue: its own weapon pool, waiting
 // line and clickable panel. Members can't pick a weapon; whoever is next in

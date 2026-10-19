@@ -2,6 +2,7 @@
 // @name         Torn Weapon UID Finder (Necromancer helper)
 // @namespace    hw-queue-bot
 // @version      1.1.0
+// @author       Eaglewing [571041]
 // @description  Adds a small 🆔 button to each weapon on the faction armoury and Items pages you are viewing. Click it to copy that weapon's unique ID (UID). Read-only: makes no requests and sends nothing anywhere.
 // @match        https://www.torn.com/factions.php*
 // @match        https://www.torn.com/item.php*

@@ -1,5 +1,7 @@
 # 💀 The Necromancer: HW Revitalize Weapon Queue Bot
 
+By **Eaglewing [571041]**
+
 A Discord bot that runs Halloween-event queues for your faction's Revitalize weapons. **Every channel gets its own independent queue**: its own weapon pool, waiting line and clickable panel. Members join the queue, and whenever a weapon in that channel frees up, the next person in line is @'d and given it for a 10-minute slot. Members can't pick a specific weapon.
 
 Members loan the weapon to themselves from the faction armoury and return it by hand. The bot never loans or retrieves anything. With an optional Torn API key, it reads the faction armoury log to **confirm loans and returns** (see [Torn API loan checks](#torn-api-loan-checks-optional)).
