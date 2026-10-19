@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Torn Weapon UID Finder (Necromancer helper)
 // @namespace    hw-queue-bot
-// @version      1.1.0
+// @version      1.2.0
 // @author       Eaglewing [571041]
-// @description  Adds a small 🆔 button to each weapon on the faction armoury and Items pages you are viewing. Click it to copy that weapon's unique ID (UID). Read-only: makes no requests and sends nothing anywhere.
+// @description  Adds a small 🆔 button to each Revitalize weapon on the faction armoury and Items pages you are viewing. Click it to copy that weapon's unique ID (UID). Read-only: makes no requests and sends nothing anywhere.
 // @match        https://www.torn.com/factions.php*
 // @match        https://www.torn.com/item.php*
 // @run-at       document-start
@@ -13,6 +13,7 @@
 /*
  * HOW IT WORKS (and why it's within Torn's scripting rules)
  *  - It only uses data from the page you have opened yourself.
+ *  - Only weapons with the Revitalize bonus get a button (see ONLY_BONUS below).
  *  - Source 1: item IDs Torn puts on the page's item rows → a 🆔 button on that row.
  *  - Source 2: when the page loads its own item data, the script reads a COPY of
  *    that response (never sends, repeats or changes a request). Weapons from that
@@ -33,7 +34,10 @@
 (function () {
   'use strict';
 
-  const fromData = new Map(); // uid -> { uid, name, bonuses: [] } read from the page's own data
+  // Only weapons with this bonus get a 🆔 button (matches Revitalize and Revitalise).
+  const ONLY_BONUS = /revitali[sz]e/i;
+
+  const fromData = new Map(); // uid -> { uid, name, bonuses: [], wanted } read from the page's own data
   const placed = new Set();   // uids that have a 🆔 button on the page
   const MARK = 'data-uidf';   // marks rows/buttons we've handled
 
@@ -67,10 +71,13 @@
       if (uidKey && nameKey) {
         const uid = String(node[uidKey]).trim();
         if (!fromData.has(uid)) {
+          let raw = '';
+          try { raw = JSON.stringify(node); } catch { /* ignore */ }
           fromData.set(uid, {
             uid,
             name: clean(node[nameKey]),
             bonuses: keys.filter((k) => /bonus/i.test(k)).flatMap((k) => bonusText(node[k])).slice(0, 3),
+            wanted: ONLY_BONUS.test(raw), // the bonus appears somewhere in this item's data
           });
         }
       }
@@ -149,6 +156,13 @@
     placed.add(uid);
   }
 
+  // A weapon counts if its row mentions the bonus (bonus icon titles, labels, classes or text)
+  // or the page's own data for that UID does.
+  function isWanted(uid, row) {
+    if (fromData.get(uid)?.wanted) return true;
+    return !!row && ONLY_BONUS.test(row.outerHTML || '');
+  }
+
   const rowOf = (el) => el.closest('li, tr, [class*="item"], [class*="row"]') || el;
   const nameElOf = (row) => row.querySelector('[class*="name"], [class*="title"]');
 
@@ -163,6 +177,7 @@
       if (!uid && el.href) uid = (el.href.match(/armou?ryI[dD]=(\d{5,})/) || [])[1] || null;
       if (!uid) continue;
       const row = rowOf(el);
+      if (!isWanted(uid, row)) continue;
       const anchor = el.tagName === 'A' ? el : nameElOf(row);
       attach(uid, row, anchor);
     }
@@ -170,7 +185,7 @@
 
   // Data UIDs: place by name only when exactly one row and one data item share that name.
   function placeFromData() {
-    const pending = [...fromData.values()].filter((it) => !placed.has(it.uid) && it.name);
+    const pending = [...fromData.values()].filter((it) => !placed.has(it.uid) && it.name && it.wanted);
     if (!pending.length) return;
     const byName = new Map();
     for (const it of pending) byName.set(norm(it.name), [...(byName.get(norm(it.name)) || []), it]);
@@ -187,7 +202,7 @@
   // ---------- the small corner chip for anything that couldn't be placed ----------
   let chip, list, open = false;
   function renderChip() {
-    const left = [...fromData.values()].filter((it) => !placed.has(it.uid) && (it.bonuses.length));
+    const left = [...fromData.values()].filter((it) => !placed.has(it.uid) && it.wanted);
     if (!left.length) { if (chip) chip.style.display = 'none'; return; }
     if (!chip) {
       chip = document.createElement('div');
