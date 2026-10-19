@@ -458,9 +458,15 @@ function enqueue(cid, userId, byAdmin = false) {
   };
 }
 
+// Button presses that worked are acknowledged silently: the panel or the tag message
+// already shows the result. Slash commands still get a private reply (Discord needs one).
+// Anything the member can't see otherwise (errors, "not your turn") stays a private message.
+const ack = (i, text) => (i.isButton?.() ? i.deferUpdate() : i.reply(eph(text)));
+
 async function joinQueue(i, cid, userId) {
   const r = enqueue(cid, userId);
-  await i.reply(eph(r.text));
+  if (r.after) await ack(i, r.text); // joined
+  else await i.reply(eph(r.text));  // couldn't join: say why
   if (r.after) await r.after();
 }
 
@@ -469,16 +475,16 @@ async function leaveQueue(i, cid) {
   if (!b) return i.reply(eph(NO_BOARD));
   const held = heldBy(b, i.user.id);
   if (held) {
-    await i.reply(eph(isActive(held[1].holder)
+    await ack(i, isActive(held[1].holder)
       ? `You've ended your slot. Please return **${wl(held[1])}** to the faction armoury.`
-      : "You've given up your turn."));
+      : "You've given up your turn.");
     return endTurn(cid, held[0], 'left');
   }
   const pos = queuePos(b, i.user.id);
   if (pos === -1) return i.reply(eph("You're not in this queue."));
   b.queue.splice(pos, 1);
   save(cid);
-  return i.reply(eph(`You left the queue. ${pick(SPOOK.left)}`));
+  return ack(i, `You left the queue. ${pick(SPOOK.left)}`);
 }
 
 async function claim(i, cid) {
@@ -494,7 +500,9 @@ async function claim(i, cid) {
   }
   const unknown = torn.enabled() && !tornName(i.user.id)
     ? "\n⚠️ I don't know your Torn name yet, so I can't confirm your loan. Press **Set Torn name** on the panel." : '';
-  await i.reply(eph(`✅ Claimed **${wl(held[1])}**. Take it from the faction armoury now. ${pick(SPOOK.claimed)}${unknown}`));
+  // Silent unless there's something they need to know (no Torn name → loan can't be confirmed).
+  if (unknown) await i.reply(eph(`✅ Claimed **${wl(held[1])}**.${unknown}`));
+  else await ack(i, `✅ Claimed **${wl(held[1])}**. Take it from the faction armoury now. ${pick(SPOOK.claimed)}`);
   await startSlot(cid, held[0]);
 }
 
@@ -503,7 +511,7 @@ async function finish(i, cid) {
   if (!b) return i.reply(eph(NO_BOARD));
   const held = heldBy(b, i.user.id);
   if (!held || !isActive(held[1].holder)) return i.reply(eph("You don't have a weapon slot running."));
-  await i.reply(eph(`🏁 Finished. Please return **${wl(held[1])}** to the faction armoury.`));
+  await ack(i, `🏁 Finished. Please return **${wl(held[1])}** to the faction armoury.`);
   await endTurn(cid, held[0], 'early');
 }
 
@@ -968,13 +976,13 @@ async function turnButton(i) {
   }
   if (action === 'pass') {
     if (!isOwner && !isAdmin(i)) return i.reply(eph(`Only <@${h.userId}> or an admin can do that.`));
-    await i.reply(eph('Passed.'));
+    await ack(i, 'Passed.');
     return endTurn(cid, key, 'passed');
   }
   if (action === 'done') {
     if (isOwner) return finish(i, cid);
     if (!isAdmin(i)) return i.reply(eph('Only the current holder or an admin can do that.'));
-    await i.reply(eph('Ended their slot.'));
+    await ack(i, 'Ended their slot.');
     return endTurn(cid, key, 'early');
   }
 }
