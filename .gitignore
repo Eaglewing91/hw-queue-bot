@@ -1,0 +1,9 @@
+# Secrets: never upload these
+.env
+
+# Live queue data (changes constantly; lives on the host or a Railway volume)
+queue-data.json
+queue-data.json.tmp
+
+# Installed packages (Railway / npm install recreates these)
+node_modules/
