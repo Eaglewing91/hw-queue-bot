@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Torn Weapon UID Finder (Necromancer helper)
 // @namespace    hw-queue-bot
-// @version      1.2.0
+// @version      1.3.0
 // @author       Eaglewing [571041]
 // @description  Adds a small 🆔 button to each Revitalize weapon on the faction armoury and Items pages you are viewing. Click it to copy that weapon's unique ID (UID). Read-only: makes no requests and sends nothing anywhere.
 // @match        https://www.torn.com/factions.php*
@@ -163,7 +163,25 @@
     return !!row && ONLY_BONUS.test(row.outerHTML || '');
   }
 
-  const rowOf = (el) => el.closest('li, tr, [class*="item"], [class*="row"]') || el;
+  // The weapon's row = the largest container around its ID that holds NO other weapon's ID.
+  // (Torn's class names are hashed, so guessing rows by class name can grab the whole list.)
+  const ID_SEL = () => ATTRS.map((a) => `[${a}]`).join(',') + ',a[href*="armoryID="],a[href*="armouryID="],a[href*="armoryId="]';
+  function uidOf(el) {
+    for (const a of ATTRS) if (looksLikeUid(el.getAttribute?.(a))) return el.getAttribute(a).trim();
+    if (el.href) return (el.href.match(/armou?ryI[dD]=(\d{5,})/) || [])[1] || null;
+    return null;
+  }
+  function rowOf(el) {
+    const mine = uidOf(el);
+    let row = el;
+    for (let cur = el.parentElement; cur && cur !== document.body; cur = cur.parentElement) {
+      const others = [...cur.querySelectorAll(ID_SEL())].some((x) => !x.classList.contains('uidf-btn') && uidOf(x) && uidOf(x) !== mine);
+      if (others) break;       // this container also holds another weapon: stop below it
+      row = cur;
+      if (cur.matches('li, tr')) break; // a real list row/table row is a natural boundary
+    }
+    return row;
+  }
   const nameElOf = (row) => row.querySelector('[class*="name"], [class*="title"]');
 
   // ---------- Source 1: IDs on the item rows ----------
@@ -178,7 +196,7 @@
       if (!uid) continue;
       const row = rowOf(el);
       if (!isWanted(uid, row)) continue;
-      const anchor = el.tagName === 'A' ? el : nameElOf(row);
+      const anchor = el.tagName === 'A' ? el : (nameElOf(row) || el);
       attach(uid, row, anchor);
     }
   }
