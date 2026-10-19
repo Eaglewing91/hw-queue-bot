@@ -10,6 +10,7 @@ Members loan the weapon to themselves from the faction armoury and return it by 
 
 1. A member presses **🎃 Join queue** on a channel's panel.
 2. When a weapon in that channel is free, the bot gives it to the next person in line and **@mentions them**, naming the weapon.
+   **Members loan the weapon to themselves** in the [faction armoury](https://www.torn.com/factions.php?step=your&type=1#/tab=armoury&start=0&sub=weapons). The bot links there but never loans anything.
 3. They have **2 minutes** to press **🙋 Claim** on that @ message. Claim only appears there, not on the panel, so the tag is where you act. If they don't, they lose their place and the next person is called. They can also press **Pass**.
 4. Claiming starts their **10-minute slot**. They take that weapon from the faction armoury.
 5. At 2 minutes left they get a ping. At 0 they're pinged to return it, and the next person is @'d.

@@ -51,6 +51,9 @@ const DEFAULTS = {
 const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240] };
 const API_POLL_MS = Math.max(15, num(process.env.API_POLL_SECONDS, 30)) * 1000; // armoury log check interval
 const MIN = 60_000;
+// Members loan weapons to themselves here (the bot only links to it; it never loans anything).
+const ARMOURY_URL = process.env.ARMOURY_URL || 'https://www.torn.com/factions.php?step=your&type=1#/tab=armoury&start=0&sub=weapons';
+const armouryLink = (label = 'faction armoury') => `[${label}](${ARMOURY_URL})`;
 // Where the queue is saved. On Railway, point DATA_DIR at the volume (e.g. /data) so it survives redeploys.
 const DATA_DIR = process.env.DATA_DIR || __dirname;
 try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch { /* exists */ }
@@ -236,7 +239,8 @@ async function chan(cid) {
 async function send(cid, content, components = []) {
   const ch = await chan(cid);
   try {
-    return await ch.send({ content, components, allowedMentions: { parse: ['users'] } });
+    // SuppressEmbeds: no big link-preview card under the armoury link.
+    return await ch.send({ content, components, allowedMentions: { parse: ['users'] }, flags: MessageFlags.SuppressEmbeds });
   } catch (err) { console.error(`Failed to post in ${cid}:`, err.message); }
 }
 
@@ -244,7 +248,7 @@ async function editMsg(cid, msgId, content, components = []) {
   if (!msgId) return;
   try {
     const m = await (await chan(cid)).messages.fetch(msgId);
-    await m.edit({ content, components, allowedMentions: { parse: [] } });
+    await m.edit({ content, components, allowedMentions: { parse: [] }, flags: MessageFlags.SuppressEmbeds });
   } catch { /* deleted or not found */ }
 }
 
@@ -350,7 +354,9 @@ async function advance(cid) {
       schedule(cid, key);
       const msg = await send(cid,
         `🎃 ${who(next.userId)}, ${pick(SPOOK.up)} You've been given **${wl(w)}**.\n` +
-        `Press **Claim** ${ts(claimBy)} or you'll lose your place in the queue.${uidNote(w)}`,
+        `👉 Loan it to yourself in the ${armouryLink()}, then ` +
+        (torn.enabled() ? `the bot claims your turn automatically (or press **Claim**)` : `press **Claim**`) +
+        `. Do it ${ts(claimBy)} or you'll lose your place in the queue.${uidNote(w)}`,
         claimRow(key, next.userId));
       if (msg && w.holder?.userId === next.userId) { w.holder.msgId = msg.id; save(); }
     }
@@ -378,7 +384,7 @@ async function startSlot(cid, key) {
 // Text of a running turn's message (re-used when the armoury log confirms the loan).
 function slotText(w, h) {
   let t = `🔫 ${who(h.userId)} has **${wl(w)}**. Slot ends ${ts(h.endsAt)}.\n` +
-    (h.autoClaimed ? `${h.quip || ''}` : `Take it from the faction armoury now. ${h.quip || ''}${uidNote(w)}`);
+    (h.autoClaimed ? `${h.quip || ''}` : `If you haven't yet, loan it to yourself in the ${armouryLink()}. ${h.quip || ''}${uidNote(w)}`);
   if (torn.enabled()) {
     t += h.autoClaimed ? '\n✅ Auto-claimed: loan seen in the armoury log.'
       : h.loanAt ? '\n✅ Loan confirmed in the armoury log.'
@@ -546,9 +552,13 @@ function panelEmbed(b) {
   const list = entries(b);
   const c = cfg(b);
   const parts = [
-    `Press **Join queue** and wait your turn. When a weapon frees up you'll be @'d and handed the next ` +
-    `available one. Press **Claim** on that message within ${c.claim} min or the spirits give your place away. ` +
-    `Then take it from the faction armoury and return it after ${c.slot} min.`,
+    `**1.** Press **Join queue** and wait your turn. When a weapon frees up you'll be @'d and handed the next one.\n` +
+    `**2.** Go to the ${armouryLink()} and **loan the weapon to yourself**. The bot doesn't do this for you.\n` +
+    (torn.enabled()
+      ? `**3.** The bot spots your loan and claims your turn automatically, or press **Claim** on the message that tags you. ` +
+        `Do one within ${c.claim} min or the spirits give your place away.\n`
+      : `**3.** Press **Claim** on the message that tags you within ${c.claim} min, or the spirits give your place away.\n`) +
+    `**4.** Return it to the armoury when your ${c.slot} min are up.`,
     `\n**🗡️ Weapons (${list.length})**`,
   ];
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
