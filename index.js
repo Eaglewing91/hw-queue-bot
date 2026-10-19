@@ -378,9 +378,10 @@ async function startSlot(cid, key) {
 // Text of a running turn's message (re-used when the armoury log confirms the loan).
 function slotText(w, h) {
   let t = `🔫 ${who(h.userId)} has **${wl(w)}**. Slot ends ${ts(h.endsAt)}.\n` +
-    `Take it from the faction armoury now. ${h.quip || ''}${uidNote(w)}`;
+    (h.autoClaimed ? `${h.quip || ''}` : `Take it from the faction armoury now. ${h.quip || ''}${uidNote(w)}`);
   if (torn.enabled()) {
-    t += h.loanAt ? '\n✅ Loan confirmed in the armoury log.'
+    t += h.autoClaimed ? '\n✅ Auto-claimed: loan seen in the armoury log.'
+      : h.loanAt ? '\n✅ Loan confirmed in the armoury log.'
       : tornName(h.userId) ? '\n-# Watching the armoury log for the loan…'
         : "\n-# I don't know their Torn name, so I can't confirm the loan. Use **Set Torn name** on the panel.";
   }
@@ -1015,7 +1016,8 @@ async function pollArmoury() {
   if (!torn.enabled() || polling || Date.now() < backoffUntil) return;
   const starts = [];
   for (const b of Object.values(state.boards)) {
-    for (const [, w] of entries(b)) if (isActive(w.holder)) starts.push(w.holder.calledAt || w.holder.startedAt);
+    // Active slots (loan/return checks) and turns waiting to be claimed (auto-claim on loan).
+    for (const [, w] of entries(b)) if (w.holder) starts.push(w.holder.calledAt || w.holder.startedAt || Date.now());
     for (const a of b.awaiting || []) starts.push(a.loanAt);
   }
   if (!starts.length) return;
@@ -1047,7 +1049,17 @@ async function applyArmouryEvent(ev, at, changed) {
   for (const [cid, b] of Object.entries(state.boards)) {
     for (const [key, w] of entries(b)) {
       const h = w.holder;
-      if (!isActive(h) || !torn.sameItem(ev.item, w.name) || !torn.sameName(ev.person, tornName(h.userId))) continue;
+      if (!h || !torn.sameItem(ev.item, w.name) || !torn.sameName(ev.person, tornName(h.userId))) continue;
+      // Up but not claimed yet, and the armoury shows they loaned it: claim for them.
+      if (!isActive(h)) {
+        if (ev.type === 'loan' && at >= (h.calledAt || Date.now()) - MIN) {
+          h.loanAt = at;
+          h.autoClaimed = true;
+          changed.add(cid);
+          await startSlot(cid, key); // starts the slot and edits the tag message
+        }
+        continue;
+      }
       if (ev.type === 'loan' && !h.loanAt && at >= (h.calledAt || h.startedAt) - MIN) {
         h.loanAt = at;
         changed.add(cid);

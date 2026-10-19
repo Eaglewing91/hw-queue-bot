@@ -124,6 +124,7 @@ Everything (queues, weapons, timers, Torn names, panels, pending clean-ups) is s
 
 Add `TORN_API_KEY` to `.env` and restart. While anyone has a weapon or owes a return, the bot reads your faction's armoury log every 30 seconds (`API_POLL_SECONDS`) and:
 
+- **Auto-claims.** If the member who is up loans their weapon before pressing Claim, the bot claims for them as soon as the loan shows in the log (within `API_POLL_SECONDS`). They can still press Claim themselves.
 - **Confirms loans.** When "*Name* loaned 1x Scythe…" appears for the current holder, their turn message and the panel show **✅ loaned**. Until then the panel shows **⏳ loan not seen yet**.
 - **Ends turns early on return.** If the holder returns the weapon before their time is up, their turn ends and the next person is called.
 - **Tracks late returns.** If the slot ends and the return hasn't shown up, they're listed under **👻 Not returned yet** on the panel. After `return_remind_minutes` they get one reminder ping. It clears when the return or an officer's retrieval appears in the log.
