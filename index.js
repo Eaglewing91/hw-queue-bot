@@ -39,6 +39,15 @@ const torn = require('./torn');
 const TOKEN = process.env.DISCORD_TOKEN;
 const GUILD_ID = process.env.GUILD_ID;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || '';
+// Who counts as a queue admin (any one of these is enough):
+//   • Manage Server permission
+//   • a role whose NAME is in ADMIN_ROLE_NAMES (case, spaces, emoji and punctuation ignored)
+//   • the role ADMIN_ROLE_ID
+//   • a Discord user ID listed in ADMIN_USER_IDS
+const roleKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+const listEnv = (v, d) => String(v ?? d).split(',').map((x) => x.trim()).filter(Boolean);
+const ADMIN_ROLE_NAMES = new Set(listEnv(process.env.ADMIN_ROLE_NAMES, 'Leadership,Leader,Council').map(roleKey));
+const ADMIN_USER_IDS = new Set(listEnv(process.env.ADMIN_USER_IDS, ''));
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 // Defaults for new channels. Each channel can override these with /qadmin settings.
 const DEFAULTS = {
@@ -278,10 +287,14 @@ async function emptyTrash() {
 }
 
 function isAdmin(i) {
+  if (ADMIN_USER_IDS.has(i.user?.id)) return true;
   if (i.memberPermissions?.has(PermissionFlagsBits.ManageGuild)) return true;
-  if (!ADMIN_ROLE_ID) return false;
-  const roles = i.member?.roles;
-  return Array.isArray(roles) ? roles.includes(ADMIN_ROLE_ID) : !!roles?.cache?.has(ADMIN_ROLE_ID);
+  // The member's roles arrive either as Role objects (cached) or as plain role IDs.
+  const raw = i.member?.roles;
+  const roles = Array.isArray(raw)
+    ? raw.map((id) => i.guild?.roles?.cache?.get(id) || { id, name: '' })
+    : [...(raw?.cache?.values?.() || [])];
+  return roles.some((r) => (ADMIN_ROLE_ID && r.id === ADMIN_ROLE_ID) || ADMIN_ROLE_NAMES.has(roleKey(r.name)));
 }
 
 // ---------- timers ----------
@@ -1329,6 +1342,8 @@ client.once(Events.ClientReady, async (c) => {
     setInterval(() => pollArmoury().catch((e) => console.error(e)), API_POLL_MS);
     console.log(`🔑 Torn API checks on (armoury log every ${API_POLL_MS / 1000}s while weapons are out)`);
   }
+  console.log(`🛡️ Admins: Manage Server, roles named [${[...ADMIN_ROLE_NAMES].join(', ')}]` +
+    `${ADMIN_ROLE_ID ? `, role ${ADMIN_ROLE_ID}` : ''}, ${ADMIN_USER_IDS.size} whitelisted user(s)`);
   console.log(`💀 The Necromancer has risen: logged in as ${c.user.tag}, ${Object.keys(state.boards).length} channel queue(s) loaded`);
 });
 
