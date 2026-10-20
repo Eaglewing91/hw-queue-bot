@@ -1378,6 +1378,20 @@ client.on(Events.InteractionCreate, async (i) => {
   }
 });
 
+// Clean shutdown: Railway sends SIGTERM when it replaces or stops the bot during a deploy.
+// Save, disconnect and exit 0, so a normal redeploy isn't reported as a crash.
+let shuttingDown = false;
+for (const sig of ['SIGTERM', 'SIGINT']) {
+  process.on(sig, async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`💤 The Necromancer rests (${sig}): saving and logging out`);
+    try { save(); } catch { /* ignore */ }
+    try { await client.destroy(); } catch { /* ignore */ }
+    process.exit(0);
+  });
+}
+
 // Test hook (only when HWQ_TEST is set): lets the offline test run an armoury check on demand.
 if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, state: () => state };
 
