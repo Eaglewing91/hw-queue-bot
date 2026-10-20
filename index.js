@@ -209,7 +209,28 @@ const entries = (b) => Object.entries(b.weapons);
 // Highest bonus % first (ties keep the order they were added).
 const byBonus = (list) => [...list].sort((a, b) => (Number(b[1].percent) || 0) - (Number(a[1].percent) || 0));
 // Shown on turn messages so the member takes the exact weapon (only if a UID was registered).
-const uidNote = (w) => (w.uid ? `\n-# 🔎 UID ${w.uid}: take this exact one from the armoury.` : '');
+// ---- weapon groups: copies with the same name AND bonus in one channel are interchangeable.
+// The armoury log only names the weapon type, so any copy counts for whoever's turn it is.
+const groupKey = (w) => `${keyOf(w.name)}|${keyOf(w.bonus)}`;
+const groupOf = (b, w) => byBonus(entries(b).filter(([, x]) => groupKey(x) === groupKey(w)));
+const isGroup = (b, w) => groupOf(b, w).length > 1;
+function groupLabel(list) {
+  const ws = list.map(([, w]) => w);
+  if (ws.length === 1) return wl(ws[0]);
+  const ps = ws.map((w) => Number(w.percent) || 0);
+  const lo = Math.min(...ps); const hi = Math.max(...ps);
+  return ws[0].bonus ? `${ws[0].name} (${ws[0].bonus} ${lo === hi ? lo : `${lo}–${hi}`}%)` : ws[0].name;
+}
+// Label for a weapon as members should see it: "MP5 Navy (Revitalize 12–14%)" when grouped.
+const gl = (b, w) => (b ? groupLabel(groupOf(b, w)) : wl(w));
+// Which exact weapon(s) to take: one UID, or every copy's UID with its % when grouped.
+function uidNoteFor(b, w) {
+  if (b && isGroup(b, w)) {
+    const ids = groupOf(b, w).filter(([, x]) => x.uid).map(([, x]) => `${x.uid} (${x.percent}%)`);
+    return ids.length ? `\n-# 🔎 UIDs ${ids.join(' · ')}` : '';
+  }
+  return w.uid ? `\n-# 🔎 UID ${w.uid}: take this exact one from the armoury.` : '';
+}
 const heldBy = (b, userId) => entries(b).find(([, w]) => w.holder?.userId === userId); // [key, w] | undefined
 const queuePos = (b, userId) => b.queue.findIndex((e) => e.userId === userId);
 
@@ -345,7 +366,7 @@ function schedule(cid, key) {
     const warnMs = warnMin * MIN;
     if (warnMs > 0 && left > warnMs) {
       t.warn = setTimeout(async () => {
-        const m = await send(cid, `⏳ ${who(h.userId)}, ${warnMin} min left with **${wl(w)}**. ${pick(SPOOK.warn)}`);
+        const m = await send(cid, `⏳ ${who(h.userId)}, ${warnMin} min left with **${gl(board(cid), w)}**. ${pick(SPOOK.warn)}`);
         if (m && w.holder === h) { h.extra.push(m.id); save(); }
       }, left - warnMs);
     }
@@ -387,10 +408,11 @@ async function advance(cid) {
       save(cid);
       schedule(cid, key);
       const msg = await send(cid,
-        `🎃 ${who(next.userId)}, ${pick(SPOOK.up)} You've been given **${wl(w)}**.\n` +
+        `🎃 ${who(next.userId)}, ${pick(SPOOK.up)} You've been given **${gl(b, w)}**.` +
+        (isGroup(b, w) ? ' **Take either one**; both count.\n' : '\n') +
         `👉 Loan it to yourself in the ${armouryLink()}, then ` +
         (torn.enabled() ? `the bot claims your turn automatically (or press **Claim**)` : `press **Claim**`) +
-        `. Do it ${ts(claimBy)} or you'll lose your place in the queue.${uidNote(w)}`,
+        `. Do it ${ts(claimBy)} or you'll lose your place in the queue.${uidNoteFor(b, w)}`,
         claimRow(key, next.userId));
       if (msg && w.holder?.userId === next.userId) { w.holder.msgId = msg.id; save(); }
     }
@@ -411,14 +433,14 @@ async function startSlot(cid, key) {
   h.quip = pick(SPOOK.claimed);
   save(cid);
   schedule(cid, key);
-  await editMsg(cid, h.msgId, slotText(w, h), slotRow(key, h.userId));
+  await editMsg(cid, h.msgId, slotText(w, h, board(cid)), slotRow(key, h.userId));
   autoLink(h.userId);
 }
 
 // Text of a running turn's message (re-used when the armoury log confirms the loan).
-function slotText(w, h) {
-  let t = `🔫 ${who(h.userId)} has **${wl(w)}**. Slot ends ${ts(h.endsAt)}.\n` +
-    (h.autoClaimed ? `${h.quip || ''}` : `If you haven't yet, loan it to yourself in the ${armouryLink()}. ${h.quip || ''}${uidNote(w)}`);
+function slotText(w, h, b) {
+  let t = `🔫 ${who(h.userId)} has **${gl(b, w)}**. Slot ends ${ts(h.endsAt)}.\n` +
+    (h.autoClaimed ? `${h.quip || ''}` : `If you haven't yet, loan it to yourself in the ${armouryLink()}. ${h.quip || ''}${uidNoteFor(b, w)}`);
   if (torn.enabled()) {
     t += h.autoClaimed ? '\n✅ Auto-claimed: loan seen in the armoury log.'
       : h.loanAt ? '\n✅ Loan confirmed in the armoury log.'
@@ -441,7 +463,7 @@ async function endTurn(cid, key, reason) {
   // API: we saw them loan it, so keep an eye out for the return.
   if (hadWeapon && h.loanAt && reason !== 'returned') {
     b.awaiting ??= [];
-    b.awaiting.push({ userId: h.userId, tornName: tornName(h.userId), weapon: w.name, label: wl(w),
+    b.awaiting.push({ userId: h.userId, tornName: tornName(h.userId), weapon: w.name, label: gl(b, w),
       loanAt: h.loanAt, endedAt: Date.now(), remindMsg: null });
     save(cid);
   }
@@ -449,21 +471,21 @@ async function endTurn(cid, key, reason) {
   const u = who(h.userId);
   const ret = hadWeapon && reason !== 'returned' ? ' Please return it to the faction armoury.' : '';
   const outcome = {
-    time: `⏰ ${u}'s time with **${wl(w)}** is up. ${pick(SPOOK.timeUp)}${ret}`,
-    early: `🏁 ${u} finished early with **${wl(w)}**. ${pick(SPOOK.early)}${ret}`,
+    time: `⏰ ${u}'s time with **${gl(b, w)}** is up. ${pick(SPOOK.timeUp)}${ret}`,
+    early: `🏁 ${u} finished early with **${gl(b, w)}**. ${pick(SPOOK.early)}${ret}`,
     left: `👋 ${u} left the queue. ${pick(SPOOK.left)}${ret}`,
     skipped: `⏭️ ${u} was skipped. ${pick(SPOOK.skipped)}${ret}`,
     removed: `🚫 ${u} was removed. ${pick(SPOOK.removed)}${ret}`,
-    passed: `↩️ ${u} passed on **${wl(w)}**. ${pick(SPOOK.passed)}`,
-    noclaim: `💤 ${u} didn't claim **${wl(w)}** in time and lost their place. ${pick(SPOOK.noclaim)}`,
-    returned: `📦 ${u} returned **${wl(w)}** to the armoury, so their turn is over. ${pick(SPOOK.returned)}`,
+    passed: `↩️ ${u} passed on **${gl(b, w)}**. ${pick(SPOOK.passed)}`,
+    noclaim: `💤 ${u} didn't claim **${gl(b, w)}** in time and lost their place. ${pick(SPOOK.noclaim)}`,
+    returned: `📦 ${u} returned **${gl(b, w)}** to the armoury, so their turn is over. ${pick(SPOOK.returned)}`,
   }[reason];
 
   await editMsg(cid, h.msgId, outcome); // the turn message becomes its own "ended" note
   const extra = [...h.extra];
   // Slot ran out: they may be away from Discord, so ping them to return it.
   if (reason === 'time') {
-    const m = await send(cid, `⏰ ${who(h.userId)}, time's up! Return **${wl(w)}** to the faction armoury. ${pick(SPOOK.timeUp)}`);
+    const m = await send(cid, `⏰ ${who(h.userId)}, time's up! Return **${gl(b, w)}** to the faction armoury. ${pick(SPOOK.timeUp)}`);
     if (m) extra.push(m.id);
   }
   trashLater(cid, [h.msgId, ...extra]);
@@ -596,12 +618,25 @@ function panelEmbed(b) {
     `\n**🗡️ Weapons (${list.length})**`,
   ];
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
-  for (const [, w] of byBonus(list)) {
-    const h = w.holder;
+  const holderLine = (h) => {
     const loan = torn.enabled() && isActive(h) ? (h.loanAt ? ' · ✅ loaned' : ' · ⏳ loan not seen yet') : '';
-    parts.push(isActive(h) ? `🔫 **${wl(w)}**: ${who(h.userId)}, ends ${ts(h.endsAt)}${loan}`
-      : h ? `🙋 **${wl(w)}**: ${who(h.userId)}, must claim ${ts(h.claimBy)}`
-        : `🕯️ **${wl(w)}**: free`);
+    return isActive(h) ? `🔫 ${who(h.userId)}, ends ${ts(h.endsAt)}${loan}` : `🙋 ${who(h.userId)}, must claim ${ts(h.claimBy)}`;
+  };
+  const shown = new Set();
+  for (const [, w] of byBonus(list)) {
+    const gk = groupKey(w);
+    if (shown.has(gk)) continue;
+    shown.add(gk);
+    const grp = groupOf(b, w);
+    if (grp.length === 1) {
+      const h = w.holder;
+      parts.push(h ? `${holderLine(h).slice(0, 2)} **${wl(w)}**: ${holderLine(h).slice(3)}` : `🕯️ **${wl(w)}**: free`);
+      continue;
+    }
+    parts.push(`**${groupLabel(grp)} ×${grp.length}**, either one`);
+    for (const [, x] of grp) if (x.holder) parts.push(`└ ${holderLine(x.holder)}`);
+    const free = grp.filter(([, x]) => !x.holder).length;
+    if (free) parts.push(`└ 🕯️ ${free} free`);
   }
 
   parts.push(`\n**⚰️ Queue (${b.queue.length})**`);
@@ -1103,6 +1138,7 @@ async function shameOutOfTurn(ev, at, newsId) {
     const same = entries(b).filter(([, w]) => torn.sameItem(ev.item, w.name));
     const held = same.filter(([, w]) => w.holder);
     if (!held.length) continue; // nobody's turn on that weapon here
+    if (held.length < same.length) continue; // a copy of that type was free, so nobody's turn was taken
     // Fine if the loaner IS one of the people whose turn it is on a weapon with that name.
     if (held.some(([, w]) => torn.sameName(ev.person, tornName(w.holder.userId)))) continue;
     // If we can't be sure (a holder's Torn name is unknown and the loaner isn't someone we know), don't shame.
@@ -1122,7 +1158,7 @@ async function shameOutOfTurn(ev, at, newsId) {
     const [, w] = held[0];
     const text = pick(SPOOK.shame)
       .replaceAll('{who}', whoTxt)
-      .replaceAll('{item}', wl(w))
+      .replaceAll('{item}', gl(b, w))
       .replaceAll('{holder}', who(w.holder.userId)) +
       '\nReturn it to the armoury and join the queue like everyone else. 🎃';
     await send(cid, text);
@@ -1148,7 +1184,7 @@ async function applyArmouryEvent(ev, at, changed, newsId) {
       if (ev.type === 'loan' && !h.loanAt && at >= (h.calledAt || h.startedAt) - MIN) {
         h.loanAt = at;
         changed.add(cid);
-        await editMsg(cid, h.msgId, slotText(w, h), slotRow(key, h.userId));
+        await editMsg(cid, h.msgId, slotText(w, h, b), slotRow(key, h.userId));
       } else if (ev.type === 'return' && h.loanAt && at > h.loanAt) {
         changed.add(cid);
         await endTurn(cid, key, 'returned');

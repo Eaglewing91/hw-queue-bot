@@ -42,6 +42,7 @@ Every bonus weapon in Torn, including ranked war weapons, has its own unique ID 
 
 - **The member is told exactly which one to take.** Their turn message shows "🔎 UID 9171132718: take this exact one from the armoury".
 - **Identical weapons can both be added.** Two weapons with the same name, bonus and % are kept apart by their UIDs.
+- **Same-type weapons are grouped.** Copies with the same name and bonus (e.g. two MP5 Navy, Revitalize 12% and 14%) show as one entry, "MP5 Navy (Revitalize 12–14%) ×2, either one". Whoever is called can loan **either** copy and it counts, because Torn's armoury log only names the weapon type. Taking a copy of that type while one is still free is never treated as an out-of-turn loan.
 - **A UID can only be registered once,** across all channels, so the same weapon can't be in two queues.
 - **With a Torn API key, the UID is enough.** Leave name, bonus and % blank and the bot fills them in from Torn. Without a key, enter them yourself as well.
 
