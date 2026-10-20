@@ -16,7 +16,7 @@ Members loan the weapon to themselves from the faction armoury and return it by 
 5. At 2 minutes left they get a ping. At 0 they're pinged to return it, and the next person is @'d.
 6. **🏁 Finished** hands the weapon on early. **👋 Leave queue** leaves the line or ends a turn.
 
-Weapons are handed out in the order they were added. With 3 weapons, the first 3 people in line are served at once. A member can be in several channels' queues at the same time.
+When several weapons are free, the **highest bonus %** is handed out first. The panel lists weapons highest % first. With 3 weapons, the first 3 people in line are served at once. A member can be in several channels' queues at the same time.
 
 ## Keeping channels tidy
 
@@ -125,6 +125,7 @@ Everything (queues, weapons, timers, Torn names, panels, pending clean-ups) is s
 
 Add `TORN_API_KEY` to `.env` and restart. While anyone has a weapon or owes a return, the bot reads your faction's armoury log every 30 seconds (`API_POLL_SECONDS`) and:
 
+- **Shames queue jumpers.** If someone loans a weapon while it's another member's turn, the bot posts a public, spooky call-out in that channel (tagging them if it knows their Discord, otherwise naming them). Each loan is called out once; loans from before the turn started don't count, and nobody is shamed when the bot can't be sure who's who.
 - **Auto-claims.** If the member who is up loans their weapon before pressing Claim, the bot claims for them as soon as the loan shows in the log (within `API_POLL_SECONDS`). They can still press Claim themselves.
 - **Confirms loans.** When "*Name* loaned 1x Scythe…" appears for the current holder, their turn message and the panel show **✅ loaned**. Until then the panel shows **⏳ loan not seen yet**.
 - **Ends turns early on return.** If the holder returns the weapon before their time is up, their turn ends and the next person is called.

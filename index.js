@@ -132,6 +132,15 @@ const SPOOK = {
   left: ['Vanished into the mist.', 'Poof. 💨'],
   removed: ['Banished by the coven.', 'Exorcised from the queue.'],
   skipped: ['Skipped by the crypt keepers.'],
+  // {who} = the out-of-turn loaner, {item} = weapon, {holder} = whose turn it is
+  shame: [
+    '🚨 **Grave robbery!** {who} just loaned **{item}**, but it\'s {holder}\'s turn. The Necromancer saw everything. 👁️',
+    '🧟 {who} tried to sneak **{item}** out of the crypt while it was {holder}\'s turn. Truly ghoulish behaviour.',
+    '🦇 **Queue jumper spotted!** {who} loaned **{item}**, but {holder} was first in line. The bats are judging you.',
+    '⚰️ {who} raided the armoury for **{item}** out of turn. It belongs to {holder} right now. The spirits will remember this.',
+    '🔔 *Shame… shame… shame…* {who} loaned **{item}** while it was {holder}\'s turn. Put it back before the curse spreads.',
+    '🕯️ The candles flicker in disgust. {who} took **{item}** out of turn. {holder} is still waiting for it.',
+  ],
   returned: ['Returned to the crypt. 🪦', 'An honest ghoul!', 'The armoury spirits are pleased.'],
   overdue: ['The armoury spirits grow restless. 👀', 'Something is haunting the armoury… it’s the empty slot.', 'Return it, or the curse begins.'],
   joined: [
@@ -171,6 +180,7 @@ state.names ??= {};
 state.trash ??= [];
 state.links ??= {};
 state.api ??= {};
+state.shamed ??= []; // armoury log entries already called out, so each loan is shamed once
 
 // Write to disk; if a channel is given, refresh its panel too.
 function save(cid) {
@@ -196,6 +206,8 @@ const who = (userId) => {
   return `<@${userId}>${tn ? ` (${tn})` : ''}`;
 };
 const entries = (b) => Object.entries(b.weapons);
+// Highest bonus % first (ties keep the order they were added).
+const byBonus = (list) => [...list].sort((a, b) => (Number(b[1].percent) || 0) - (Number(a[1].percent) || 0));
 // Shown on turn messages so the member takes the exact weapon (only if a UID was registered).
 const uidNote = (w) => (w.uid ? `\n-# 🔎 UID ${w.uid}: take this exact one from the armoury.` : '');
 const heldBy = (b, userId) => entries(b).find(([, w]) => w.holder?.userId === userId); // [key, w] | undefined
@@ -358,14 +370,15 @@ const slotRow = (key, userId) => [new ActionRowBuilder().addComponents(
 )];
 
 // ---------- turn logic ----------
-// Give every free weapon in a channel to the next person in that channel's line.
+// Give every free weapon in a channel to the next person in that channel's line,
+// handing out the highest bonus % first when several are free.
 const advancing = new Set();
 async function advance(cid) {
   const b = board(cid);
   if (!b || advancing.has(cid)) return;
   advancing.add(cid);
   try {
-    for (const [key, w] of entries(b)) {
+    for (const [key, w] of byBonus(entries(b))) {
       if (w.holder || !b.weapons[key]) continue;
       const next = b.queue.shift();
       if (!next) break;
@@ -583,7 +596,7 @@ function panelEmbed(b) {
     `\n**🗡️ Weapons (${list.length})**`,
   ];
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
-  for (const [, w] of list) {
+  for (const [, w] of byBonus(list)) {
     const h = w.holder;
     const loan = torn.enabled() && isActive(h) ? (h.loanAt ? ' · ✅ loaned' : ' · ⏳ loan not seen yet') : '';
     parts.push(isActive(h) ? `🔫 **${wl(w)}**: ${who(h.userId)}, ends ${ts(h.endsAt)}${loan}`
@@ -1060,7 +1073,7 @@ async function pollArmoury() {
     const changed = new Set();
     for (const n of news) {
       const ev = torn.parseArmoury(n.text);
-      if (ev) await applyArmouryEvent(ev, n.timestamp * 1000, changed);
+      if (ev) await applyArmouryEvent(ev, n.timestamp * 1000, changed, n.id);
     }
     save();
     for (const cid of changed) queuePanelUpdate(cid);
@@ -1076,7 +1089,48 @@ async function pollArmoury() {
   await remindOverdue();
 }
 
-async function applyArmouryEvent(ev, at, changed) {
+// Discord user for a Torn name, if the bot knows it (linked or set on the panel).
+function discordIdForTornName(name) {
+  for (const [uid, l] of Object.entries(state.links)) if (torn.sameName(l.name, name)) return uid;
+  for (const [uid, n] of Object.entries(state.names)) if (torn.sameName(n, name)) return uid;
+  return null;
+}
+
+// A loan of a weapon that's currently someone else's turn → a public, spooky call-out in that channel.
+async function shameOutOfTurn(ev, at, newsId) {
+  if (ev.type !== 'loan') return;
+  for (const [cid, b] of Object.entries(state.boards)) {
+    const same = entries(b).filter(([, w]) => torn.sameItem(ev.item, w.name));
+    const held = same.filter(([, w]) => w.holder);
+    if (!held.length) continue; // nobody's turn on that weapon here
+    // Fine if the loaner IS one of the people whose turn it is on a weapon with that name.
+    if (held.some(([, w]) => torn.sameName(ev.person, tornName(w.holder.userId)))) continue;
+    // If we can't be sure (a holder's Torn name is unknown and the loaner isn't someone we know), don't shame.
+    const loanerUid = discordIdForTornName(ev.person);
+    if (loanerUid && held.some(([, w]) => w.holder.userId === loanerUid)) continue;
+    if (!loanerUid && held.some(([, w]) => !tornName(w.holder.userId))) continue;
+    // Only loans made after that turn began (an older loan isn't jumping this queue).
+    const since = Math.min(...held.map(([, w]) => w.holder.calledAt || w.holder.startedAt || Date.now()));
+    if (at < since) continue;
+    const key = `${cid}|${newsId || `${at}|${ev.person}|${ev.item}`}`;
+    if (state.shamed.includes(key)) continue;
+    state.shamed.push(key);
+    state.shamed = state.shamed.slice(-500);
+    save();
+    const uid = discordIdForTornName(ev.person);
+    const whoTxt = uid ? `<@${uid}> (${ev.person})` : `**${ev.person}**`;
+    const [, w] = held[0];
+    const text = pick(SPOOK.shame)
+      .replaceAll('{who}', whoTxt)
+      .replaceAll('{item}', wl(w))
+      .replaceAll('{holder}', who(w.holder.userId)) +
+      '\nReturn it to the armoury and join the queue like everyone else. 🎃';
+    await send(cid, text);
+  }
+}
+
+async function applyArmouryEvent(ev, at, changed, newsId) {
+  await shameOutOfTurn(ev, at, newsId);
   for (const [cid, b] of Object.entries(state.boards)) {
     for (const [key, w] of entries(b)) {
       const h = w.holder;
