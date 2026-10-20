@@ -41,12 +41,20 @@ const GUILD_ID = process.env.GUILD_ID;
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID || '';
 // Who counts as a queue admin (any one of these is enough):
 //   • Manage Server permission
-//   • a role whose NAME is in ADMIN_ROLE_NAMES (case, spaces, emoji and punctuation ignored)
+//   • a role whose name CONTAINS a keyword from ADMIN_ROLE_KEYWORDS (case, spaces, emoji and
+//     punctuation ignored), e.g. "Leader" matches "Faction Leader" and "Leadership Team"
 //   • the role ADMIN_ROLE_ID
 //   • a Discord user ID listed in ADMIN_USER_IDS
 const roleKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const listEnv = (v, d) => String(v ?? d).split(',').map((x) => x.trim()).filter(Boolean);
-const ADMIN_ROLE_NAMES = new Set(listEnv(process.env.ADMIN_ROLE_NAMES, 'Leadership,Leader,Council').map(roleKey));
+const ADMIN_ROLE_KEYWORDS = listEnv(process.env.ADMIN_ROLE_KEYWORDS ?? process.env.ADMIN_ROLE_NAMES, 'Leader,Council')
+  .map(roleKey).filter(Boolean);
+const isAdminRoleName = (name) => { const k = roleKey(name); return !!k && ADMIN_ROLE_KEYWORDS.some((kw) => k.includes(kw)); };
+// Names of the roles in this server that count as admin (for the admin panel and startup log).
+function adminRolesHere(guild) {
+  const roles = [...(guild?.roles?.cache?.values?.() || [])];
+  return roles.filter((r) => (ADMIN_ROLE_ID && r.id === ADMIN_ROLE_ID) || isAdminRoleName(r.name)).map((r) => r.name);
+}
 const ADMIN_USER_IDS = new Set(listEnv(process.env.ADMIN_USER_IDS, ''));
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 // Defaults for new channels. Each channel can override these with /qadmin settings.
@@ -294,7 +302,7 @@ function isAdmin(i) {
   const roles = Array.isArray(raw)
     ? raw.map((id) => i.guild?.roles?.cache?.get(id) || { id, name: '' })
     : [...(raw?.cache?.values?.() || [])];
-  return roles.some((r) => (ADMIN_ROLE_ID && r.id === ADMIN_ROLE_ID) || ADMIN_ROLE_NAMES.has(roleKey(r.name)));
+  return roles.some((r) => (ADMIN_ROLE_ID && r.id === ADMIN_ROLE_ID) || isAdminRoleName(r.name));
 }
 
 // ---------- timers ----------
@@ -1154,11 +1162,13 @@ async function apiTest(i) {
 const row = (...c) => new ActionRowBuilder().addComponents(...c);
 const backRow = () => row(btn('a_back', 'Back', ButtonStyle.Secondary, '↩️'));
 
-function adminHeader(b) {
+function adminHeader(b, guild) {
   const c = cfg(b);
+  const found = adminRolesHere(guild);
   const inUse = entries(b).filter(([, w]) => w.holder).length;
   return `🛠️ **Admin controls for this channel**\n-# Only you can see this. Weapons: ${entries(b).length} (${inUse} in use) · ` +
-    `Queue: ${b.queue.length} · ${c.slot}-min slots · ${c.claim} min to claim${torn.enabled() ? ' · 🔑 API checks on' : ''}`;
+    `Queue: ${b.queue.length} · ${c.slot}-min slots · ${c.claim} min to claim${torn.enabled() ? ' · 🔑 API checks on' : ''}` +
+    `\n-# 🛡️ Admin roles here: ${found.length ? found.join(', ') : 'none (only Manage Server and whitelisted users)'}`;
 }
 
 function adminMenu(b) {
@@ -1180,7 +1190,8 @@ function adminMenu(b) {
   ];
 }
 
-const adminView = (b, note) => ({ content: (note ? `${note}\n\n` : '') + adminHeader(b), components: adminMenu(b) });
+const adminView = (b, note, guild = client.guilds?.cache?.get?.(GUILD_ID)) =>
+  ({ content: (note ? `${note}\n\n` : '') + adminHeader(b, guild), components: adminMenu(b) });
 
 // A picker screen: one select menu plus a Back button.
 const pickView = (prompt, menu) => ({ content: prompt, components: [row(menu), backRow()] });
@@ -1342,8 +1353,11 @@ client.once(Events.ClientReady, async (c) => {
     setInterval(() => pollArmoury().catch((e) => console.error(e)), API_POLL_MS);
     console.log(`🔑 Torn API checks on (armoury log every ${API_POLL_MS / 1000}s while weapons are out)`);
   }
-  console.log(`🛡️ Admins: Manage Server, roles named [${[...ADMIN_ROLE_NAMES].join(', ')}]` +
+  let found = [];
+  try { const g = await c.guilds.fetch(GUILD_ID); await g.roles.fetch(); found = adminRolesHere(g); } catch { /* ignore */ }
+  console.log(`🛡️ Admins: Manage Server, roles containing [${ADMIN_ROLE_KEYWORDS.join(', ')}]` +
     `${ADMIN_ROLE_ID ? `, role ${ADMIN_ROLE_ID}` : ''}, ${ADMIN_USER_IDS.size} whitelisted user(s)`);
+  console.log(`🛡️ Admin roles in this server: ${found.length ? found.join(', ') : 'none yet'}`);
   console.log(`💀 The Necromancer has risen: logged in as ${c.user.tag}, ${Object.keys(state.boards).length} channel queue(s) loaded`);
 });
 

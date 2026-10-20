@@ -75,7 +75,7 @@ All commands apply to **the channel they're used in**.
 **Everyone** (these are also buttons on the panel)
 - `/queue join [torn_name]`, `/queue leave`, `/queue status`
 
-**Admins**: anyone with a role named **Leadership**, **Leader** or **Council** (`ADMIN_ROLE_NAMES`), anyone whose Discord user ID is in `ADMIN_USER_IDS`, the role in `ADMIN_ROLE_ID`, or anyone with Manage Server
+**Admins**: anyone with a role whose name contains **Leader** or **Council**, e.g. "Faction Leader", "Leadership" or "Council Member" (`ADMIN_ROLE_KEYWORDS`; the 🛠️ Admin controls list which roles matched), anyone whose Discord user ID is in `ADMIN_USER_IDS`, the role in `ADMIN_ROLE_ID`, or anyone with Manage Server
 - `/qadmin panel`: post (or re-post) this channel's panel
 - `/qadmin add-weapon [name] [bonus] [percent] [uid]`: add a weapon to this channel's pool (with a key, `uid` alone is enough)
 - `/qadmin remove-weapon weapon`: remove a weapon. If someone had just been given it and hadn't claimed yet, they go back to the front of the queue.
