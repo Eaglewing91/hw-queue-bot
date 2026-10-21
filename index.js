@@ -77,8 +77,8 @@ try { fs.mkdirSync(DATA_DIR, { recursive: true }); } catch { /* exists */ }
 const DATA_FILE = path.join(DATA_DIR, 'queue-data.json');
 const QUEUE_SHOWN = 15; // queue entries listed on a panel
 
-if (!TOKEN || !GUILD_ID) {
-  console.error('Missing DISCORD_TOKEN or GUILD_ID in .env');
+if (!TOKEN) {
+  console.error('Missing DISCORD_TOKEN in .env');
   process.exit(1);
 }
 
@@ -1280,7 +1280,12 @@ function adminMenu(b) {
   ];
 }
 
-const adminView = (b, note, guild = client.guilds?.cache?.get?.(GUILD_ID)) =>
+// The server a board's channel lives in (for listing that server's admin roles).
+const guildOfBoard = (b) => {
+  const cid = Object.keys(state.boards).find((k) => state.boards[k] === b);
+  return (cid && client.channels?.cache?.get?.(cid)?.guild) || client.guilds?.cache?.get?.(GUILD_ID);
+};
+const adminView = (b, note, guild = guildOfBoard(b)) =>
   ({ content: (note ? `${note}\n\n` : '') + adminHeader(b, guild), components: adminMenu(b) });
 
 // A picker screen: one select menu plus a Back button.
@@ -1426,10 +1431,10 @@ async function adminInteraction(i) {
 
 // ---------- wiring ----------
 client.once(Events.ClientReady, async (c) => {
-  await new REST().setToken(TOKEN).put(
-    Routes.applicationGuildCommands(c.application.id, GUILD_ID),
-    { body: commands },
-  );
+  // Slash commands go to every server the bot is in (and to new ones as it's added, below).
+  const ids = new Set([...(c.guilds?.cache?.keys?.() || [])]);
+  if (GUILD_ID) ids.add(GUILD_ID);
+  for (const gid of ids) await registerCommands(c, gid);
   for (const cid of Object.keys(state.boards)) {
     for (const key of Object.keys(state.boards[cid].weapons)) {
       if (state.boards[cid].weapons[key].holder) schedule(cid, key);
@@ -1443,12 +1448,27 @@ client.once(Events.ClientReady, async (c) => {
     setInterval(() => pollArmoury().catch((e) => console.error(e)), API_POLL_MS);
     console.log(`🔑 Torn API checks on (armoury log every ${API_POLL_MS / 1000}s while weapons are out)`);
   }
-  let found = [];
-  try { const g = await c.guilds.fetch(GUILD_ID); await g.roles.fetch(); found = adminRolesHere(g); } catch { /* ignore */ }
+  const found = [];
+  for (const gid of ids) {
+    try { const g = await c.guilds.fetch(gid); await g.roles.fetch(); const r = adminRolesHere(g); if (r.length) found.push(`${g.name}: ${r.join(', ')}`); } catch { /* ignore */ }
+  }
   console.log(`🛡️ Admins: Manage Server, roles containing [${ADMIN_ROLE_KEYWORDS.join(', ')}]` +
     `${ADMIN_ROLE_ID ? `, role ${ADMIN_ROLE_ID}` : ''}, ${ADMIN_USER_IDS.size} whitelisted user(s)`);
-  console.log(`🛡️ Admin roles in this server: ${found.length ? found.join(', ') : 'none yet'}`);
+  console.log(`🛡️ Servers: ${ids.size}. Admin roles found: ${found.length ? found.join(' | ') : 'none yet'}`);
   console.log(`💀 The Necromancer has risen: logged in as ${c.user.tag}, ${Object.keys(state.boards).length} channel queue(s) loaded`);
+});
+
+async function registerCommands(c, gid) {
+  try {
+    await new REST().setToken(TOKEN).put(Routes.applicationGuildCommands(c.application.id, gid), { body: commands });
+  } catch (err) {
+    console.error(`Couldn't register slash commands in server ${gid}: ${err.message}`);
+  }
+}
+
+client.on(Events.GuildCreate, async (g) => {
+  await registerCommands(client, g.id);
+  console.log(`🏚️ Added to a new server: ${g.name} (${g.id}). Slash commands registered.`);
 });
 
 client.on(Events.InteractionCreate, async (i) => {
