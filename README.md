@@ -177,7 +177,7 @@ With a key set, it also uses the Torn API, under Torn's API terms: https://www.t
 
 ## Tranche API keys (one per faction)
 
-Each queue channel can be linked to one 39th tranche. That channel then reads **that tranche's** armoury log with **that tranche's** key, and only members of that faction can join.
+Each queue channel must be linked to one 39th tranche: **until it is, the queue is locked** (the panel shows a set-up notice and Join is greyed out). That channel then reads **that tranche's** armoury log with **that tranche's** key, and only members of that faction can join.
 
 1. The bot owner sets `KEY_SECRET` in Railway once (a long random string; never change it).
 2. In the queue channel: 🛠️ **Admin** → 🔑 **API keys** → 🏷️ **Set this channel's tranche**.

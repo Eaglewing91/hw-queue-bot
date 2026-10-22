@@ -246,13 +246,17 @@ const TRANCHES = (process.env.TRANCHE_FACTIONS || '19,16312,7049,22680,31764').s
 const tranche = (fid) => (state.tranches[fid] ??= {});
 const trancheName = (fid) => state.tranches[fid]?.name || `Faction ${fid}`;
 const hasKey = (fid) => !!state.tranches[fid]?.enc;
+// A queue stays locked until an admin picks its tranche (REQUIRE_TRANCHE=false turns this off).
+const REQUIRE_TRANCHE = process.env.REQUIRE_TRANCHE !== 'false';
+const isOpen = (b) => !REQUIRE_TRANCHE || !!b?.faction;
+const LOCKED = "👻 This queue isn't open yet. An admin needs to pick this channel's tranche first (🛠️ Admin → 🔑 API keys → 🏷️ Set this channel's tranche).";
 const keyOf_ = (fid) => (hasKey(fid) ? keys.decrypt(state.tranches[fid].enc) : null);
 const KEY_LINK = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Necromancer&faction=armorynews';
 // Is this channel's armoury log being watched? Linked to a tranche → that tranche's key;
 // not linked → the owner's key (the original single-faction setup).
-const boardWatched = (b) => (b?.faction ? hasKey(b.faction) && state.tranches[b.faction].status !== 'bad' : torn.enabled());
+const boardWatched = (b) => (b?.faction ? hasKey(b.faction) && state.tranches[b.faction].status !== 'bad' : !REQUIRE_TRANCHE && torn.enabled());
 // Which Torn key reads a board's armoury log: 'owner', a faction ID, or null (none).
-const sourceOf = (b) => (b.faction ? (hasKey(b.faction) ? b.faction : null) : (torn.enabled() ? 'owner' : null));
+const sourceOf = (b) => (b.faction ? (hasKey(b.faction) ? b.faction : null) : (!REQUIRE_TRANCHE && torn.enabled() ? 'owner' : null));
 
 async function refreshTrancheNames() {
   for (const fid of TRANCHES) {
@@ -435,7 +439,7 @@ const slotRow = (key, userId) => [new ActionRowBuilder().addComponents(
 const advancing = new Set();
 async function advance(cid) {
   const b = board(cid);
-  if (!b || advancing.has(cid)) return;
+  if (!b || advancing.has(cid) || !isOpen(b)) return;
   advancing.add(cid);
   try {
     for (const [key, w] of byBonus(entries(b))) {
@@ -538,6 +542,7 @@ const NO_BOARD = "There's no weapon queue in this channel. An admin can set one 
 function enqueue(cid, userId, byAdmin = false) {
   const b = board(cid);
   if (!b) return { text: NO_BOARD };
+  if (!isOpen(b)) return { text: LOCKED };
   const you = byAdmin ? `<@${userId}> is` : "You're";
   const held = heldBy(b, userId);
   if (held) return { text: `${you} already ${isActive(held[1].holder) ? 'using' : 'up for'} **${wl(held[1])}**.` };
@@ -650,6 +655,11 @@ function myStatus(cid, userId) {
 function panelEmbed(b) {
   const list = entries(b);
   const c = cfg(b);
+  if (!isOpen(b)) {
+    return new EmbedBuilder().setTitle('💀 The Necromancer: Revitalize Queue').setColor(0xff7518)
+      .setDescription("⚠️ **This queue isn't set up yet.**\nAn admin needs to pick this channel's tranche: " +
+        "🛠️ **Admin** → 🔑 **API keys** → 🏷️ **Set this channel's tranche**.\n\n-# The spirits are waiting. Joining opens once it's set.");
+  }
   const parts = [
     `**1.** Press **Join queue**. You'll be @'d when it's your turn.\n` +
     (boardWatched(b)
@@ -702,10 +712,11 @@ function panelEmbed(b) {
     .setFooter({ text: `${c.slot}-min slots · ${c.claim} min to claim · times are estimates · ${joke}` });
 }
 
-function panelComponents() {
+function panelComponents(b) {
+  const locked = !isOpen(b);
   return [
     new ActionRowBuilder().addComponents(
-      btn('p_join', 'Join queue', ButtonStyle.Success, '🎃'),
+      btn('p_join', 'Join queue', ButtonStyle.Success, '🎃').setDisabled(locked),
       btn('p_leave', 'Leave queue', ButtonStyle.Danger, '👋'),
     ),
     new ActionRowBuilder().addComponents(
@@ -716,7 +727,7 @@ function panelComponents() {
   ];
 }
 
-const panelPayload = (b) => ({ content: '', embeds: [panelEmbed(b)], components: panelComponents() });
+const panelPayload = (b) => ({ content: '', embeds: [panelEmbed(b)], components: panelComponents(b) });
 
 // Panel edits are batched per channel, so a burst of changes becomes one edit.
 // The panel is only ever edited, never re-posted, unless an admin runs /qadmin panel.
@@ -1376,7 +1387,7 @@ function keysView(b, note) {
   const content = (note ? `${note}\n\n` : '') +
     `🔑 **Tranche API keys**\n${lines.join('\n')}\n\n` +
     `This channel uses: **${b.faction ? trancheName(b.faction) : 'not set'}**` +
-    (b.faction ? '' : torn.enabled() ? " (reads the bot owner's armoury)" : '') + '\n' +
+    (b.faction ? '' : REQUIRE_TRANCHE ? ' (queue locked until set)' : '') + '\n' +
     "-# How to add one: press **Create key in Torn**, create it, copy it, then **Add / replace key**.\n" + KEY_TERMS;
   const anyKey = TRANCHES.some(hasKey);
   return {
@@ -1568,12 +1579,13 @@ async function adminInteraction(i) {
     }
     case 'a_kchan':
       return i.update(pickView("🏷️ Which tranche is this channel's queue for? Its armoury log is checked, and only its members can join.",
-        trancheSelect('a_kchan_pick', TRANCHES, [{ label: 'None (no tranche)', value: '0', description: 'Anyone can join · uses the bot owner\'s armoury' }])));
+        trancheSelect('a_kchan_pick', TRANCHES, [{ label: 'None (lock this queue)', value: '0', description: 'Nobody can join until a tranche is picked' }])));
     case 'a_kchan_pick': {
       const fid = Number(i.values[0]);
       if (fid) b.faction = fid; else delete b.faction;
       save(cid);
       queuePanelUpdate(cid);
+      advance(cid);
       return i.update(keysView(b, fid ? `🏷️ This channel is now for **${trancheName(fid)}**.` : '🏷️ This channel is no longer linked to a tranche.'));
     }
 
