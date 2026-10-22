@@ -736,10 +736,36 @@ const panelPayload = (b) => ({ content: '', embeds: [panelEmbed(b)], components:
 
 // Panel edits are batched per channel, so a burst of changes becomes one edit.
 // The panel is only ever edited, never re-posted, unless an admin runs /qadmin panel.
+// When queue positions change (someone called up, someone leaves, is moved or removed), the panel
+// moves to the bottom of the channel so it stays in view. Joining at the back, claims, loans and
+// chat never move it; they just edit it in place.
 const panelTimers = {};
+const lastQueue = {}; // cid -> user IDs in queue order at the last panel update
 function queuePanelUpdate(cid) {
   if (panelTimers[cid] || !board(cid)?.panelId) return;
-  panelTimers[cid] = setTimeout(() => { delete panelTimers[cid]; renderPanel(cid); }, 1500);
+  panelTimers[cid] = setTimeout(() => { delete panelTimers[cid]; flushPanel(cid); }, 1500);
+}
+
+async function flushPanel(cid) {
+  const b = board(cid);
+  if (!b?.panelId) return;
+  const now = b.queue.map((q) => q.userId);
+  const before = lastQueue[cid] ?? now;
+  lastQueue[cid] = now;
+  // Positions changed unless the old queue is still the front of the new one (only joins at the back).
+  const moved = before.length > 0 && before.some((u, n) => now[n] !== u);
+  if (moved) {
+    try {
+      const channel = await chan(cid);
+      // Ask Discord for the newest message (the bot doesn't receive chat, so a cached ID could be stale).
+      const latest = await channel.messages.fetch({ limit: 1 });
+      const lastId = latest?.first?.()?.id ?? channel?.lastMessageId;
+      if (lastId && lastId !== b.panelId) return await repostPanel(cid, channel);
+    } catch (err) {
+      console.error(`Panel move failed in ${cid}:`, err.message);
+    }
+  }
+  return renderPanel(cid);
 }
 
 async function renderPanel(cid) {
