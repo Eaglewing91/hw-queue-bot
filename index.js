@@ -65,8 +65,9 @@ const DEFAULTS = {
   warn: num(process.env.WARN_MINUTES, 2),        // "time almost up" ping, minutes before the end (0 = off)
   cleanup: num(process.env.CLEANUP_SECONDS, 120), // delete finished turn messages after N seconds (0 = keep)
   remind: num(process.env.RETURN_REMIND_MINUTES, 5), // API only: remind if not returned N minutes after the slot
+  book: num(process.env.BOOK_MINUTES, 15),       // length of a booked slot, minutes
 };
-const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240] };
+const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240], book: [5, 240] };
 const API_POLL_MS = Math.max(15, num(process.env.API_POLL_SECONDS, 30)) * 1000; // armoury log check interval
 const MIN = 60_000;
 // Members loan weapons to themselves here (the bot only links to it; it never loans anything).
@@ -445,29 +446,126 @@ const slotRow = (key, userId) => [new ActionRowBuilder().addComponents(
 // Give every free weapon in a channel to the next person in that channel's line,
 // handing out the highest bonus % first when several are free.
 const advancing = new Set();
+// ---------- 📅 bookings: reserve a start time (any weapon, or a specific one) ----------
+// A booking gets the next matching free weapon at its time, ahead of the queue. Queue turns that
+// would run into a booking are shortened to end at the booking time (or the weapon is held if
+// that would leave less than a few minutes). At least BOOK_KEEP weapons are never bookable at once,
+// so the walk-up queue always keeps moving.
+const BOOK_AHEAD_MIN = 6 * 60;  // how far ahead people can book
+const BOOK_KEEP = 1;            // weapons always left for the queue
+const BOOK_MIN_SHORT = 5;       // don't start a queue turn shorter than this (minutes); hold the weapon
+const BOOK_EXPIRE_MIN = 60;     // a booking still unserved this long after its time is dropped
+const bookingsOn = (b) => !b?.bookingOff;
+const bookingsOf = (b) => (b.bookings ??= []);
+const tct = (ms) => new Date(ms).toISOString().slice(11, 16) + ' TCT';
+// Which weapons a booking may use: 'any', or one weapon group ('g:<name|bonus>').
+const bookingKeys = (b, bk) => entries(b).filter(([, w]) => bk.weapon === 'any' || `g:${groupKey(w)}` === bk.weapon).map(([k]) => k);
+function bookingLabel(b, bk) {
+  if (bk.weapon === 'any') return 'Any weapon';
+  const grp = entries(b).filter(([, w]) => `g:${groupKey(w)}` === bk.weapon);
+  return grp.length ? groupLabel(byBonus(grp)) : 'a removed weapon';
+}
+const maxBookable = (b) => Math.max(0, entries(b).length - BOOK_KEEP);
+
+// Is a start time T free for a new booking of `weapon` ('any' or 'g:…')?
+function slotFree(b, T, weapon) {
+  const len = cfg(b).book * MIN;
+  const overlap = bookingsOf(b).filter((x) => Math.abs(x.at - T) < len);
+  if (overlap.length >= maxBookable(b)) return false;
+  if (weapon !== 'any') {
+    const size = entries(b).filter(([, w]) => `g:${groupKey(w)}` === weapon).length;
+    if (!size || overlap.filter((x) => x.weapon === weapon).length >= size) return false;
+  }
+  return true;
+}
+
+// Start times someone can book now: on the slot grid (TCT), from 5 min ahead up to BOOK_AHEAD_MIN.
+function bookableTimes(b, weapon) {
+  const step = cfg(b).book * MIN;
+  const now = Date.now();
+  const out = [];
+  for (let T = Math.ceil((now + 5 * MIN) / step) * step; T <= now + BOOK_AHEAD_MIN * MIN && out.length < 25; T += step) {
+    if (slotFree(b, T, weapon)) out.push(T);
+  }
+  return out;
+}
+
+// Plan which weapon each upcoming booking will use, preferring weapons that will be
+// free by then anyway, so free weapons aren't held unless they have to be.
+function planBookings(b, horizon) {
+  const plan = new Map(); // weaponKey -> booking
+  const now = Date.now();
+  const due = bookingsOf(b).filter((x) => x.at > now && x.at < horizon)
+    .sort((x, y) => x.at - y.at || (x.weapon === 'any') - (y.weapon === 'any'));
+  for (const bk of due) {
+    const cands = bookingKeys(b, bk).filter((k) => !plan.has(k));
+    const freeBy = (k) => { const h = b.weapons[k].holder; return !h ? 1 : (isActive(h) && h.endsAt <= bk.at ? 0 : 2); };
+    cands.sort((x, y) => freeBy(x) - freeBy(y));
+    if (cands.length && freeBy(cands[0]) <= 1) plan.set(cands[0], bk);
+  }
+  return plan;
+}
+
+// Hand weapon `key` to `userId` (a queue turn or a booking).
+async function callUp(cid, b, key, userId, extra = {}) {
+  const w = b.weapons[key];
+  const claimBy = Date.now() + cfg(b).claim * MIN;
+  w.holder = { userId, calledAt: Date.now(), claimBy, startedAt: null, endsAt: null, msgId: null, extra: [], ...extra };
+  save(cid);
+  schedule(cid, key);
+  const short = extra.capEnd ? ` · short turn, booked ${ts(extra.capEnd)}` : '';
+  const msg = await send(cid,
+    `${extra.booked ? '📅' : '🎃'} <@${userId}> → **${gl(b, w)}**${isGroup(b, w) ? ' (either one)' : ''} · ` +
+    `[loan it](${ARMOURY_URL}) ${ts(claimBy)}${boardWatched(b) ? '' : ', then press **Claim**'}${uidInline(b, w)}${short}`,
+    claimRow(key, userId));
+  if (msg && w.holder?.userId === userId) { w.holder.msgId = msg.id; save(); }
+}
+
+// Serve bookings whose time has come, then drop ones that went unserved for too long.
+async function serveBookings(cid, b) {
+  const now = Date.now();
+  const list = bookingsOf(b);
+  for (const bk of [...list].filter((x) => x.at <= now).sort((x, y) => x.at - y.at)) {
+    if (heldBy(b, bk.userId)) { b.bookings = list.filter((x) => x !== bk); save(cid); continue; } // already has a weapon
+    const key = byBonus(entries(b).filter(([k, w]) => !w.holder && bookingKeys(b, bk).includes(k)))[0]?.[0];
+    if (!key) continue; // nothing free yet: first in line when one frees up
+    b.bookings = bookingsOf(b).filter((x) => x !== bk);
+    const qp = queuePos(b, bk.userId);
+    if (qp !== -1) b.queue.splice(qp, 1); // served by the booking
+    await callUp(cid, b, key, bk.userId, { booked: true, slotMin: cfg(b).book });
+  }
+  const stale = bookingsOf(b).filter((x) => now - x.at > BOOK_EXPIRE_MIN * MIN);
+  if (stale.length) { b.bookings = bookingsOf(b).filter((x) => !stale.includes(x)); save(cid); }
+}
+
 async function advance(cid) {
   const b = board(cid);
   if (!b || advancing.has(cid) || !isOpen(b)) return;
   advancing.add(cid);
   try {
+    await serveBookings(cid, b);
+    const slotMs = cfg(b).slot * MIN;
     for (const [key, w] of byBonus(entries(b))) {
-      if (w.holder || !b.weapons[key]) continue;
+      if (w.holder || !b.weapons[key] || !b.queue.length) continue;
+      // Is this weapon needed for a booking before a full turn would end?
+      const bk = planBookings(b, Date.now() + slotMs + cfg(b).claim * MIN).get(key);
+      let capEnd;
+      if (bk) {
+        if (bk.at - Date.now() < (BOOK_MIN_SHORT + cfg(b).claim) * MIN) continue; // hold it for the booking
+        capEnd = bk.at;
+      }
       const next = b.queue.shift();
-      if (!next) break;
-      const claimBy = Date.now() + cfg(b).claim * MIN;
-      w.holder = { userId: next.userId, calledAt: Date.now(), claimBy, startedAt: null, endsAt: null, msgId: null, extra: [] };
-      save(cid);
-      schedule(cid, key);
-      const msg = await send(cid,
-        `🎃 <@${next.userId}> → **${gl(b, w)}**${isGroup(b, w) ? ' (either one)' : ''} · ` +
-        `[loan it](${ARMOURY_URL}) ${ts(claimBy)}${boardWatched(b) ? '' : ', then press **Claim**'}${uidInline(b, w)}`,
-        claimRow(key, next.userId));
-      if (msg && w.holder?.userId === next.userId) { w.holder.msgId = msg.id; save(); }
+      await callUp(cid, b, key, next.userId, capEnd ? { capEnd } : {});
     }
   } finally {
     advancing.delete(cid);
   }
-  if (b.queue.length && entries(b).some(([, w]) => !w.holder)) await advance(cid);
+  // Loop again only if a queue turn could still start (held weapons don't count).
+  if (b.queue.length && entries(b).some(([k, w]) => !w.holder && !planBookings(b, Date.now() + cfg(b).slot * MIN + cfg(b).claim * MIN).has(k))
+    && !advance.again) {
+    advance.again = true;
+    try { await advance(cid); } finally { advance.again = false; }
+  }
 }
 
 async function startSlot(cid, key) {
@@ -476,7 +574,7 @@ async function startSlot(cid, key) {
   const h = w.holder;
   h.startedAt = Date.now();
   const c = cfg(board(cid));
-  h.endsAt = h.startedAt + c.slot * MIN;
+  h.endsAt = Math.min(h.startedAt + (h.slotMin || c.slot) * MIN, h.capEnd || Infinity); // booked turns use the booking length; a booking may cut a queue turn short
   h.warnMin = c.warn; // settings changed mid-turn don't affect a running slot
   h.quip = pick(SPOOK.claimed);
   save(cid);
@@ -647,6 +745,8 @@ function myStatus(cid, userId) {
   } else {
     lines.push("You're not in this queue.");
   }
+  const mine = bookingsOf(b).find((x) => x.userId === userId);
+  if (mine) lines.push(`📅 Booked: **${bookingLabel(b, mine)}** at **${tct(mine.at)}** (${ts(mine.at)}).`);
   const aw = (b.awaiting || []).find((a) => a.userId === userId);
   if (aw) lines.push(`👻 The armoury log hasn't seen **${aw.label}** come back yet. Please return it.`);
   const link = state.links[userId];
@@ -695,6 +795,11 @@ function panelEmbed(b) {
     if (free) parts.push(`└ 🕯️ ${free} free`);
   }
 
+  const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
+  if (upcoming.length) {
+    parts.push(`\n**📅 Booked (${upcoming.length})**`);
+    for (const bk of upcoming.slice(0, 10)) parts.push(`${tct(bk.at)} · ${who(bk.userId)} · ${bookingLabel(b, bk)} · ${ts(bk.at)}`);
+  }
   parts.push(`\n**⚰️ Queue (${b.queue.length})**`);
   if (!b.queue.length) parts.push(SPOOK.empty[Math.floor(Date.now() / 3_600_000) % SPOOK.empty.length]);
   const times = etas(b, Math.min(b.queue.length, QUEUE_SHOWN));
@@ -723,6 +828,7 @@ function panelComponents(b) {
     new ActionRowBuilder().addComponents(
       btn('p_join', 'Join queue', ButtonStyle.Success, '🎃').setDisabled(locked),
       btn('p_leave', 'Leave queue', ButtonStyle.Danger, '👋'),
+      ...(bookingsOn(b) && maxBookable(b) > 0 ? [btn('p_book', 'Book a slot', ButtonStyle.Primary, '📅').setDisabled(locked)] : []),
     ),
     new ActionRowBuilder().addComponents(
       btn('p_done', 'Finished', ButtonStyle.Primary, '🏁'),
@@ -972,6 +1078,9 @@ function opRemoveWeapon(cid, key) {
 function opRemoveUser(cid, userId) {
   const b = board(cid);
   if (!b) return { text: NO_BOARD };
+  const hadBooking = bookingsOf(b).some((x) => x.userId === userId);
+  b.bookings = bookingsOf(b).filter((x) => x.userId !== userId);
+  if (hadBooking) save(cid);
   const held = heldBy(b, userId);
   if (held) return { text: `🚫 Removed <@${userId}> and ended their turn.`, after: () => endTurn(cid, held[0], 'removed') };
   const pos = queuePos(b, userId);
@@ -1041,12 +1150,13 @@ function describeSettings(b) {
     `🧹 Clean up finished turns: **${c.cleanup ? `after ${c.cleanup} sec` : 'never'}**${mark('cleanup')}`,
     `👻 Return reminder: **${c.remind} min after the slot**${mark('remind')}` +
       (torn.enabled() ? '' : ' *(needs a Torn API key)*'),
+    `📅 Booked slot length: **${c.book} min**${mark('book')}`,
   ].join('\n');
 }
 
 const SETTING_LABELS = {
   slot: 'Slot length (minutes)', claim: 'Time to claim (minutes)', warn: 'Warning (minutes)',
-  cleanup: 'Clean-up delay (seconds)', remind: 'Return reminder (minutes)',
+  cleanup: 'Clean-up delay (seconds)', remind: 'Return reminder (minutes)', book: 'Booking length (minutes)',
 };
 
 // changes: { key: number } to set, { key: null } to go back to the default, undefined = leave alone.
@@ -1069,7 +1179,7 @@ function opSettings(cid, changes = {}, reset = false) {
     next[k] = k === 'cleanup' ? Math.round(v) : Math.round(v * 100) / 100;
   }
   const c = { ...DEFAULTS, ...next };
-  if (c.warn >= c.slot) return { text: `The warning (${c.warn} min) has to be shorter than the slot (${c.slot} min).` };
+  if (c.warn >= c.slot || c.warn >= c.book) return { text: `The warning (${c.warn} min) has to be shorter than the slot and booking lengths.` };
   b.settings = next;
   save(cid);
   return { text: `⚙️ **Updated.** New turns use these timings. Anyone mid-turn keeps the time they were given.\n${describeSettings(b)}` };
@@ -1100,7 +1210,11 @@ async function panelButton(i) {
     case 'p_join': return joinQueue(i, cid, i.user.id);
     case 'p_leave': return leaveQueue(i, cid);
     case 'p_done': return finish(i, cid);
-    case 'p_me': return i.reply(eph(myStatus(cid, i.user.id)));
+    case 'p_me': {
+      const mine = board(cid) && bookingsOf(board(cid)).find((x) => x.userId === i.user.id);
+      return i.reply({ ...eph(myStatus(cid, i.user.id)), ...(mine ? { components: [row(btn(`b_cancel|${mine.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] } : {}) });
+    }
+    case 'p_book': return bookInteraction(i);
     case 'p_name': {
       const input = new TextInputBuilder()
         .setCustomId('torn_name')
@@ -1118,6 +1232,74 @@ async function panelButton(i) {
 }
 
 // Buttons on turn messages: claim|key|userId, pass|key|userId, done|key|userId
+async function bookInteraction(i) {
+  const cid = i.channelId;
+  const b = board(cid);
+  const id = i.customId;
+  const reply = (p) => (id === 'p_book' ? i.reply({ ...p, flags: MessageFlags.Ephemeral }) : i.update(p));
+  if (!b) return reply({ content: NO_BOARD, components: [] });
+  if (id.startsWith('b_cancel|')) {
+    const bk = bookingsOf(b).find((x) => x.id === id.split('|')[1]);
+    if (!bk) return reply({ content: 'That booking is already gone.', components: [] });
+    if (bk.userId !== i.user.id && !isAdmin(i)) return i.reply(eph('That isn\'t your booking.'));
+    b.bookings = bookingsOf(b).filter((x) => x !== bk);
+    save(cid);
+    await reply({ content: `🗑️ Booking for **${tct(bk.at)}** cancelled.`, components: [] });
+    return advance(cid);
+  }
+  if (!isOpen(b)) return reply({ content: LOCKED, components: [] });
+  if (!bookingsOn(b) || maxBookable(b) < 1) return reply({ content: 'Booking is switched off in this channel.', components: [] });
+  if (b.faction && (await inTranche(b, i.user.id)) === false) {
+    return reply({ content: `👻 This queue is for **${trancheName(b.faction)}** members only.`, components: [] });
+  }
+  const mine = bookingsOf(b).find((x) => x.userId === i.user.id);
+  if (mine) {
+    return reply({ content: `📅 You already have a booking: **${bookingLabel(b, mine)}** at **${tct(mine.at)}** (${ts(mine.at)}). One at a time.`,
+      components: [row(btn(`b_cancel|${mine.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] });
+  }
+  const head = `📅 **Book a ${cfg(b).book}-min slot.** At your time you'll be tagged for the weapon, ahead of the queue.\n` +
+    `-# Up to ${BOOK_AHEAD_MIN / 60} hours ahead · 1 booking at a time · times are Torn City Time (TCT) · ` +
+    `loan it within ${cfg(b).claim} min or the booking is released`;
+
+  if (id === 'p_book') {
+    const groups = new Map();
+    for (const [, w] of byBonus(entries(b))) if (!groups.has(groupKey(w))) groups.set(groupKey(w), groupOf(b, w));
+    const opts = [{ label: 'Any weapon', value: 'any', description: 'First one free at your time (most times available)', emoji: { name: '🎲' } },
+      ...[...groups].slice(0, 24).map(([gk, grp]) => ({
+        label: `${groupLabel(grp)}${grp.length > 1 ? ` ×${grp.length}` : ''}`.slice(0, 100), value: `g:${gk}`.slice(0, 100),
+        description: grp.length > 1 ? 'Either copy' : undefined,
+      }))];
+    const menu = new StringSelectMenuBuilder().setCustomId('b_w').setPlaceholder('Pick a weapon')
+      .addOptions(opts.map((o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined))));
+    return reply({ content: `${head}\n\n**Which weapon?**`, components: [row(menu)] });
+  }
+  if (id === 'b_w') {
+    const weapon = i.values[0];
+    const times = bookableTimes(b, weapon);
+    if (!times.length) return reply({ content: `${head}\n\nNo free times for **${weapon === 'any' ? 'any weapon' : bookingLabel(b, { weapon })}** in the next ${BOOK_AHEAD_MIN / 60} hours.`, components: [] });
+    const left = (T) => maxBookable(b) - bookingsOf(b).filter((x) => Math.abs(x.at - T) < cfg(b).book * MIN).length;
+    const menu = new StringSelectMenuBuilder().setCustomId(`b_t|${weapon}`.slice(0, 100)).setPlaceholder('Pick a start time')
+      .addOptions(times.map((T) => {
+        const mins = Math.round((T - Date.now()) / MIN);
+        const inTxt = mins < 60 ? `in ${mins} min` : `in ${Math.floor(mins / 60)} h ${mins % 60} min`;
+        return { label: tct(T), value: String(T), description: `${inTxt} · ${left(T)} bookable` };
+      }));
+    return reply({ content: `${head}\n\n**${weapon === 'any' ? 'Any weapon' : bookingLabel(b, { weapon })}**: pick a start time.`, components: [row(menu)] });
+  }
+  if (id.startsWith('b_t|')) {
+    const weapon = id.slice(4);
+    const T = Number(i.values[0]);
+    if (!(T > Date.now()) || !slotFree(b, T, weapon)) return reply({ content: '⌛ That time was just taken. Press **Book a slot** again.', components: [] });
+    const bk = { id: Math.random().toString(36).slice(2, 10), userId: i.user.id, at: T, weapon, createdAt: Date.now() };
+    bookingsOf(b).push(bk);
+    save(cid);
+    autoLink(i.user.id);
+    return reply({ content: `✅ Booked **${bookingLabel(b, bk)}** at **${tct(T)}** (${ts(T)}). I'll tag you then. ` +
+      `Loan it within ${cfg(b).claim} min or the booking is released.`,
+      components: [row(btn(`b_cancel|${bk.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] });
+  }
+}
+
 async function turnButton(i) {
   const cid = i.channelId;
   const parts = i.customId.split('|');
@@ -1386,6 +1568,7 @@ function adminMenu(b) {
       btn('a_move', 'Move member', ButtonStyle.Secondary, '↕️').setDisabled(emptyQueue)),
     row(btn('a_settings', 'Settings', ButtonStyle.Primary, '⚙️'),
       btn('a_keys', 'API keys', ButtonStyle.Secondary, '🔑'),
+      btn('a_book', bookingsOn(b) ? 'Bookings: on' : 'Bookings: off', bookingsOn(b) ? ButtonStyle.Success : ButtonStyle.Secondary, '📅'),
       btn('a_repost', 'Re-post panel', ButtonStyle.Secondary, '📌')),
     row(btn('a_clear', 'Clear queue', ButtonStyle.Danger, '🧹').setDisabled(emptyQueue),
       btn('a_delete', 'Delete queue', ButtonStyle.Danger, '🪦')),
@@ -1465,6 +1648,20 @@ async function saveTrancheKey(fid, key, userId) {
   save();
   for (const [cid, bb] of Object.entries(state.boards)) if (bb.faction === fid) queuePanelUpdate(cid);
   return `✅ Key saved for **${trancheName(fid)}**.` + (owner ? '' : " (I couldn't confirm which faction it belongs to, so make sure it's the right one.)");
+}
+
+function bookAdminView(b, note) {
+  const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
+  return {
+    content: (note ? `${note}\n\n` : '') + `📅 **Bookings in this channel: ${bookingsOn(b) ? 'on' : 'off'}**\n` +
+      `Booked slot length: **${cfg(b).book} min** · up to ${BOOK_AHEAD_MIN / 60} h ahead · 1 per member · ` +
+      `${BOOK_KEEP} weapon always left for the queue (${maxBookable(b)} bookable at once)\n` +
+      (upcoming.length ? upcoming.slice(0, 10).map((x) => `• ${tct(x.at)} · <@${x.userId}> · ${bookingLabel(b, x)}`).join('\n') : '-# No bookings yet.'),
+    components: [row(
+      btn('a_book_toggle', bookingsOn(b) ? 'Turn bookings off' : 'Turn bookings on', bookingsOn(b) ? ButtonStyle.Danger : ButtonStyle.Success, '📅'),
+      btn('a_book_len', 'Booking length', ButtonStyle.Secondary, '⏱️'),
+      btn('a_back', 'Back', ButtonStyle.Secondary, '↩️'))],
+  };
 }
 
 // A picker screen: one select menu plus a Back button.
@@ -1662,6 +1859,17 @@ async function adminInteraction(i) {
       return i.update(keysView(b, fid ? `🏷️ This channel is now for **${trancheName(fid)}**.` : '🏷️ This channel is no longer linked to a tranche.'));
     }
 
+    case 'a_book': return i.update(bookAdminView(b));
+    case 'a_book_toggle':
+      b.bookingOff = bookingsOn(b);
+      if (b.bookingOff) b.bookings = [];
+      save(cid);
+      return i.update(bookAdminView(b, b.bookingOff ? '📅 Booking switched **off** (existing bookings cancelled).' : '📅 Booking switched **on**.'));
+    case 'a_book_len':
+      return i.showModal(modalOf('m_booklen', 'Booking length', [
+        textInput('book', 'Booked slot length (minutes)', { required: false, max: 4, value: b.settings?.book, placeholder: `Blank = default (${DEFAULTS.book})` }),
+      ]));
+
     case 'a_repost': {
       await repostPanel(cid, i.channel);
       return i.update(adminView(b, '📌 Panel re-posted.'));
@@ -1681,6 +1889,11 @@ async function adminInteraction(i) {
       await i.update({ content: r.text, components: [] });
       return r.after?.();
     }
+  }
+  if (id === 'm_booklen') {
+    const v = f('book').trim();
+    const r = opSettings(cid, { book: v === '' ? null : Number(v) });
+    return i.update(bookAdminView(board(cid), r.text.startsWith('⚙️') ? `⏱️ Booked slots are now **${cfg(board(cid)).book} min**.` : r.text));
   }
   if (id.startsWith('m_move|')) return adminDone(i, cid, opMove(cid, id.split('|')[1], Number(f('position').trim())));
   if (id.startsWith('m_key|')) {
@@ -1710,6 +1923,12 @@ client.once(Events.ClientReady, async (c) => {
   await emptyTrash();
   for (const t of state.trash) setTimeout(() => emptyTrash(), Math.max(0, t.at - Date.now()) + 50);
   setInterval(() => pollArmoury().catch((e) => console.error(e)), API_POLL_MS);
+  // Bookings: call people up at their time, and keep the panel's booking list fresh.
+  setInterval(() => {
+    for (const [cid, b] of Object.entries(state.boards)) {
+      if (bookingsOf(b).some((x) => x.at <= Date.now())) advance(cid).catch((e) => console.error(e));
+    }
+  }, 20_000);
   const keyed = TRANCHES.filter(hasKey).length;
   console.log(`🔑 Armoury checks every ${API_POLL_MS / 1000}s while weapons are out · owner key: ${torn.enabled() ? 'on' : 'off'} · ` +
     `tranche keys: ${keyed}/${TRANCHES.length}${keys.ready() ? '' : ' (KEY_SECRET not set: keys can\'t be added)'}`);
@@ -1742,8 +1961,9 @@ client.on(Events.InteractionCreate, async (i) => {
     if (i.isAutocomplete()) return await autocomplete(i);
     if (i.isChatInputCommand()) return await command(i);
     const id = i.customId || '';
-    const isAdminUi = id === 'p_admin' || id.startsWith('a_') || id === 'm_addw' || id === 'm_settings' || id.startsWith('m_move|') || id.startsWith('m_key|');
+    const isAdminUi = id === 'p_admin' || id.startsWith('a_') || id === 'm_addw' || id === 'm_settings' || id === 'm_booklen' || id.startsWith('m_move|') || id.startsWith('m_key|');
     if (isAdminUi) return await adminInteraction(i);
+    if (id.startsWith('b_')) return await bookInteraction(i);
     if (i.isButton()) return await (id.startsWith('p_') ? panelButton(i) : turnButton(i));
     if (i.isModalSubmit()) return await modal(i);
   } catch (err) {
@@ -1769,6 +1989,6 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 }
 
 // Test hook (only when HWQ_TEST is set): lets the offline test run an armoury check on demand.
-if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, state: () => state };
+if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, advance, state: () => state };
 
 client.login(TOKEN);
