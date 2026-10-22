@@ -459,6 +459,7 @@ const BOOK_EXPIRE_MIN = 60;     // a booking still unserved this long after its 
 const bookingsOn = (b) => !b?.bookingOff;
 const bookingsOf = (b) => (b.bookings ??= []);
 const tct = (ms) => new Date(ms).toISOString().slice(11, 16) + ' TCT';
+const tctIn = (ms) => `${tct(ms)} (${ts(ms)})`; // "18:00 TCT (in 42 minutes)"
 // Which weapons a booking may use: 'any', or one weapon group ('g:<name|bonus>').
 const bookingKeys = (b, bk) => entries(b).filter(([, w]) => bk.weapon === 'any' || `g:${groupKey(w)}` === bk.weapon).map(([k]) => k);
 function bookingLabel(b, bk) {
@@ -518,7 +519,7 @@ async function callUp(cid, b, key, userId, extra = {}) {
   w.holder = { userId, calledAt: Date.now(), claimBy, startedAt: null, endsAt: null, msgId: null, extra: [], ...extra };
   save(cid);
   schedule(cid, key);
-  const short = extra.capEnd ? ` · short turn, booked ${ts(extra.capEnd)}` : '';
+  const short = extra.capEnd ? ` · short turn, ends ${tctIn(extra.capEnd)} for a booking` : '';
   const msg = await send(cid,
     `${extra.booked ? '📅' : '🎃'} <@${userId}> → **${gl(b, w)}**${isGroup(b, w) ? ' (either one)' : ''} · ` +
     `[loan it](${ARMOURY_URL}) ${ts(claimBy)}${boardWatched(b) ? '' : ', then press **Claim**'}${uidInline(b, w)}${short}`,
@@ -591,7 +592,7 @@ async function startSlot(cid, key) {
 
 // Text of a running turn's message (re-used when the armoury log confirms the loan).
 function slotText(w, h, b) {
-  let t = `🔫 ${who(h.userId)} has **${gl(b, w)}**. Slot ends ${ts(h.endsAt)}.\n` +
+  let t = `🔫 ${who(h.userId)} has **${gl(b, w)}**. Slot ends ${tctIn(h.endsAt)}.\n` +
     (h.autoClaimed ? `${h.quip || ''}` : `If you haven't yet, loan it to yourself in the ${armouryLink()}. ${h.quip || ''}${uidNoteFor(b, w)}`);
   if (boardWatched(b)) {
     t += h.autoClaimed ? '\n✅ Auto-claimed: loan seen in the armoury log.'
@@ -669,7 +670,7 @@ function enqueue(cid, userId, byAdmin = false) {
   return {
     text: n < freeNow
       ? `${lead} A weapon is free, so ${they} up now! Press **Claim** on the message that tags ${byAdmin ? 'them' : 'you'}, within ${cfg(b).claim} min.`
-      : `${lead} Position ${n + 1}, turn roughly ${ts(etas(b, n + 1)[n])}.`,
+      : `${lead} Position ${n + 1}, turn roughly ${tctIn(etas(b, n + 1)[n])}.`,
     after: () => advance(cid),
   };
 }
@@ -744,10 +745,10 @@ function myStatus(cid, userId) {
   if (held) {
     const h = held[1].holder;
     lines.push(isActive(h)
-      ? `🔫 You have **${wl(held[1])}**. Your slot ends ${ts(h.endsAt)}.`
+      ? `🔫 You have **${wl(held[1])}**. Your slot ends ${tctIn(h.endsAt)}.`
       : `🙋 You're up for **${wl(held[1])}**! Press **Claim** on the message that tags you. Time runs out ${ts(h.claimBy)}.`);
   } else if (pos !== -1) {
-    lines.push(`🕒 You're #${pos + 1} in this queue. Your turn is roughly ${ts(etas(b, pos + 1)[pos])}.`);
+    lines.push(`🕒 You're #${pos + 1} in this queue. Your turn is roughly ${tctIn(etas(b, pos + 1)[pos])}.`);
   } else {
     lines.push("You're not in this queue.");
   }
@@ -782,7 +783,7 @@ function panelEmbed(b) {
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
   const holderLine = (h) => {
     const loan = boardWatched(b) && isActive(h) ? (h.loanAt ? ' · ✅ loaned' : ' · ⏳ loan not seen yet') : '';
-    return isActive(h) ? `🔫 ${who(h.userId)}, ends ${ts(h.endsAt)}${loan}` : `🙋 ${who(h.userId)}, must claim ${ts(h.claimBy)}`;
+    return isActive(h) ? `🔫 ${who(h.userId)}, ends ${tctIn(h.endsAt)}${loan}` : `🙋 ${who(h.userId)}, must claim ${ts(h.claimBy)}`;
   };
   const shown = new Set();
   for (const [, w] of byBonus(list)) {
@@ -804,12 +805,13 @@ function panelEmbed(b) {
   const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
   if (upcoming.length) {
     parts.push(`\n**📅 Booked (${upcoming.length})**`);
-    for (const bk of upcoming.slice(0, 10)) parts.push(`${tct(bk.at)} · ${who(bk.userId)} · ${bookingLabel(b, bk)} · ${ts(bk.at)}`);
+    for (const bk of upcoming.slice(0, 5)) parts.push(`${tct(bk.at)} · ${who(bk.userId)} · ${bookingLabel(b, bk)} · ${ts(bk.at)}`);
+    if (upcoming.length > 5) parts.push(`-# …and ${upcoming.length - 5} more. Press **Book a slot** to see free times.`);
   }
   parts.push(`\n**⚰️ Queue (${b.queue.length})**`);
   if (!b.queue.length) parts.push(SPOOK.empty[Math.floor(Date.now() / 3_600_000) % SPOOK.empty.length]);
   const times = etas(b, Math.min(b.queue.length, QUEUE_SHOWN));
-  b.queue.slice(0, QUEUE_SHOWN).forEach((e, n) => parts.push(`${n + 1}. ${who(e.userId)}, ~${ts(times[n])}`));
+  b.queue.slice(0, QUEUE_SHOWN).forEach((e, n) => parts.push(`${n + 1}. ${who(e.userId)}, ~${tctIn(times[n])}`));
   if (b.queue.length > QUEUE_SHOWN) parts.push(`…and ${b.queue.length - QUEUE_SHOWN} more lost souls`);
 
   if (b.awaiting?.length) {
