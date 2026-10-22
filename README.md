@@ -173,3 +173,27 @@ With a key set, it also uses the Torn API, under Torn's API terms: https://www.t
 | **Purpose of Use** | Public community tools (confirming faction weapon loans and returns for the queue) |
 | **Key Storage & Sharing** | Stored / Used only for automation (in `.env` on the bot host; never shown in Discord or logs) |
 | **Key Access Level** | Minimal, from a member with faction API access. Uses only: faction › news (armoury) and user › basic |
+
+
+## Tranche API keys (one per faction)
+
+Each queue channel can be linked to one 39th tranche. That channel then reads **that tranche's** armoury log with **that tranche's** key, and only members of that faction can join.
+
+1. The bot owner sets `KEY_SECRET` in Railway once (a long random string; never change it).
+2. In the queue channel: 🛠️ **Admin** → 🔑 **API keys** → 🏷️ **Set this channel's tranche**.
+3. A leader presses 🆕 **Create key in Torn** (opens Torn's key page with only `faction → armorynews` ticked), creates the key, then ➕ **Add / replace key**, picks the tranche and pastes it into the private pop-up.
+4. The bot tests the key, checks it belongs to that faction, encrypts it and shows ✅. ❌ = no key, ⚠️ = Torn stopped accepting it.
+
+Keys are never displayed, logged or readable back by anyone; they can only be replaced or removed. Member names and the join check use the bot owner's key (public data only).
+
+**Terms for tranche keys**
+
+| | |
+|---|---|
+| Data Storage | Only locally: linked Torn names and loan/return times |
+| Data Sharing | Faction: loan status on that channel's queue panel |
+| Purpose of Use | Public community tools: confirm armoury loans and returns |
+| Key Storage & Sharing | Stored (encrypted) / Used only for automation |
+| Key Access Level | Custom: faction > armorynews |
+
+[Torn API terms](https://www.torn.com/api.html)

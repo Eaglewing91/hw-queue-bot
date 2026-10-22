@@ -34,6 +34,7 @@ const {
   StringSelectMenuBuilder, UserSelectMenuBuilder,
 } = require('discord.js');
 const torn = require('./torn');
+const keys = require('./keys');
 
 // ---------- config ----------
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -180,6 +181,7 @@ state.names ??= {};
 state.trash ??= [];
 state.links ??= {};
 state.api ??= {};
+state.tranches ??= {}; // { [factionId]: { name, enc, addedBy, addedAt, status, err, checkedAt } }
 state.shamed ??= []; // armoury log entries already called out, so each loan is shamed once
 
 // Write to disk; if a channel is given, refresh its panel too.
@@ -239,6 +241,43 @@ function setName(userId, name) {
   if (n) state.names[userId] = n.slice(0, 32);
 }
 
+// ---------- tranches: one faction (and one armoury key) per queue channel ----------
+const TRANCHES = (process.env.TRANCHE_FACTIONS || '19,16312,7049,22680,31764').split(',').map((x) => Number(x.trim())).filter(Boolean);
+const tranche = (fid) => (state.tranches[fid] ??= {});
+const trancheName = (fid) => state.tranches[fid]?.name || `Faction ${fid}`;
+const hasKey = (fid) => !!state.tranches[fid]?.enc;
+const keyOf_ = (fid) => (hasKey(fid) ? keys.decrypt(state.tranches[fid].enc) : null);
+const KEY_LINK = 'https://www.torn.com/preferences.php#tab=api?step=addNewKey&title=Necromancer&faction=armorynews';
+// Is this channel's armoury log being watched? Linked to a tranche → that tranche's key;
+// not linked → the owner's key (the original single-faction setup).
+const boardWatched = (b) => (b?.faction ? hasKey(b.faction) && state.tranches[b.faction].status !== 'bad' : torn.enabled());
+// Which Torn key reads a board's armoury log: 'owner', a faction ID, or null (none).
+const sourceOf = (b) => (b.faction ? (hasKey(b.faction) ? b.faction : null) : (torn.enabled() ? 'owner' : null));
+
+async function refreshTrancheNames() {
+  for (const fid of TRANCHES) {
+    if (state.tranches[fid]?.name) continue;
+    const n = await torn.factionName(fid);
+    if (n) { tranche(fid).name = n; save(); }
+  }
+}
+
+// Join check: is this member in the channel's tranche? true / false / null (couldn't tell).
+const factionCache = new Map(); // userId -> { fid, at }
+async function memberFaction(userId) {
+  const c = factionCache.get(userId);
+  if (c && Date.now() - c.at < 6 * 60 * MIN) return c.fid;
+  const fid = await torn.userFaction(state.links[userId]?.id || userId);
+  if (fid !== null) factionCache.set(userId, { fid, at: Date.now() });
+  return fid;
+}
+async function inTranche(b, userId) {
+  if (!b.faction || !torn.enabled()) return null;
+  const timeout = new Promise((r) => setTimeout(() => r(null), 2200)); // Discord needs an answer within 3 s
+  const fid = await Promise.race([memberFaction(userId), timeout]);
+  return fid === null || fid === undefined ? null : fid === b.faction;
+}
+
 // The Torn name used to match armoury log lines: API-verified link first, then a manually set name.
 const tornName = (userId) => state.links[userId]?.name || state.names[userId] || null;
 
@@ -256,7 +295,7 @@ async function autoLink(userId) {
     state.names[userId] = u.name;
     save();
     for (const cid of Object.keys(state.boards)) queuePanelUpdate(cid);
-  } catch { /* not linked in Torn, or API hiccup: they can use Set Torn name */ }
+  } catch { /* not linked in Torn, or API hiccup: they can still press Claim */ }
 }
 
 // Estimated start times for the first `count` people in a board's queue.
@@ -411,7 +450,7 @@ async function advance(cid) {
         `🎃 ${who(next.userId)}, ${pick(SPOOK.up)} You've been given **${gl(b, w)}**.` +
         (isGroup(b, w) ? ' **Take either one**; both count.\n' : '\n') +
         `👉 Loan it to yourself in the ${armouryLink()}, then ` +
-        (torn.enabled() ? `the bot claims your turn automatically (or press **Claim**)` : `press **Claim**`) +
+        (boardWatched(b) ? `the bot claims your turn automatically (or press **Claim**)` : `press **Claim**`) +
         `. Do it ${ts(claimBy)} or you'll lose your place in the queue.${uidNoteFor(b, w)}`,
         claimRow(key, next.userId));
       if (msg && w.holder?.userId === next.userId) { w.holder.msgId = msg.id; save(); }
@@ -441,11 +480,11 @@ async function startSlot(cid, key) {
 function slotText(w, h, b) {
   let t = `🔫 ${who(h.userId)} has **${gl(b, w)}**. Slot ends ${ts(h.endsAt)}.\n` +
     (h.autoClaimed ? `${h.quip || ''}` : `If you haven't yet, loan it to yourself in the ${armouryLink()}. ${h.quip || ''}${uidNoteFor(b, w)}`);
-  if (torn.enabled()) {
+  if (boardWatched(b)) {
     t += h.autoClaimed ? '\n✅ Auto-claimed: loan seen in the armoury log.'
       : h.loanAt ? '\n✅ Loan confirmed in the armoury log.'
       : tornName(h.userId) ? '\n-# Watching the armoury log for the loan…'
-        : "\n-# I don't know their Torn name, so I can't confirm the loan. Use **Set Torn name** on the panel.";
+        : "\n-# Their Discord isn't linked in Torn, so I can't spot the loan. They'll need to press **Claim**.";
   }
   return t;
 }
@@ -527,6 +566,10 @@ function enqueue(cid, userId, byAdmin = false) {
 const ack = (i, text) => (i.isButton?.() ? i.deferUpdate() : i.reply(eph(text)));
 
 async function joinQueue(i, cid, userId) {
+  const b = board(cid);
+  if (b?.faction && (await inTranche(b, userId)) === false) {
+    return i.reply(eph(`👻 This queue is for **${trancheName(b.faction)}** members only. The spirits turn you away.`));
+  }
   const r = enqueue(cid, userId);
   if (r.after) await ack(i, r.text); // joined
   else await i.reply(eph(r.text));  // couldn't join: say why
@@ -561,8 +604,8 @@ async function claim(i, cid) {
         ? "You're not in this queue. Press **Join queue** first."
         : "It's not your turn yet. You'll be @'d when a weapon is free. 🕯️"));
   }
-  const unknown = torn.enabled() && !tornName(i.user.id)
-    ? "\n⚠️ I don't know your Torn name yet, so I can't confirm your loan. Press **Set Torn name** on the panel." : '';
+  const unknown = boardWatched(b) && !tornName(i.user.id)
+    ? "\n⚠️ Your Discord isn't linked to your Torn account, so I can't spot your loans. Link it in Torn (Preferences → Discord) for auto-claim." : '';
   // Silent unless there's something they need to know (no Torn name → loan can't be confirmed).
   if (unknown) await i.reply(eph(`✅ Claimed **${wl(held[1])}**.${unknown}`));
   else await ack(i, `✅ Claimed **${wl(held[1])}**. Take it from the faction armoury now. ${pick(SPOOK.claimed)}`);
@@ -599,7 +642,7 @@ function myStatus(cid, userId) {
   const link = state.links[userId];
   const tn = state.names[userId];
   lines.push(link ? `-# Torn: ${link.name} [${link.id}] (linked automatically)`
-    : tn ? `-# Torn name: ${tn}` : '-# No Torn name set. Use **Set Torn name** on the panel.');
+    : tn ? `-# Torn name: ${tn}` : "-# Your Discord isn't linked in Torn, so loans can't be auto-claimed. Link it in Torn (Preferences → Discord).");
   return lines.join('\n');
 }
 
@@ -609,7 +652,7 @@ function panelEmbed(b) {
   const c = cfg(b);
   const parts = [
     `**1.** Press **Join queue**. You'll be @'d when it's your turn.\n` +
-    (torn.enabled()
+    (boardWatched(b)
       ? `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself within **${c.claim} min**. The bot auto-claims your turn.\n`
       : `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself, then press **Claim** within **${c.claim} min**.\n`) +
     `**3.** Return it after **${c.slot} min**.`,
@@ -617,7 +660,7 @@ function panelEmbed(b) {
   ];
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
   const holderLine = (h) => {
-    const loan = torn.enabled() && isActive(h) ? (h.loanAt ? ' · ✅ loaned' : ' · ⏳ loan not seen yet') : '';
+    const loan = boardWatched(b) && isActive(h) ? (h.loanAt ? ' · ✅ loaned' : ' · ⏳ loan not seen yet') : '';
     return isActive(h) ? `🔫 ${who(h.userId)}, ends ${ts(h.endsAt)}${loan}` : `🙋 ${who(h.userId)}, must claim ${ts(h.claimBy)}`;
   };
   const shown = new Set();
@@ -668,7 +711,6 @@ function panelComponents() {
     new ActionRowBuilder().addComponents(
       btn('p_done', 'Finished', ButtonStyle.Primary, '🏁'),
       btn('p_me', 'My status', ButtonStyle.Secondary, '📋'),
-      btn('p_name', 'Set Torn name', ButtonStyle.Secondary, '✏️'),
       btn('p_admin', 'Admin', ButtonStyle.Secondary, '🛠️'),
     ),
   ];
@@ -1089,33 +1131,61 @@ async function modal(i) {
 let polling = false;
 let backoffUntil = 0;
 
+const backoff = new Map(); // key source -> time to try again
+const KEY_DEAD = [2, 10, 13, 16, 18]; // wrong key, owner jailed/inactive, too little access, paused
+
 async function pollArmoury() {
-  if (!torn.enabled() || polling || Date.now() < backoffUntil) return;
-  const starts = [];
-  for (const b of Object.values(state.boards)) {
+  if (polling) return;
+  // Group the channels by which key reads their armoury log.
+  const groups = new Map(); // source -> { cids: Set, starts: [] }
+  for (const [cid, b] of Object.entries(state.boards)) {
+    const src = sourceOf(b);
+    if (src === null || Date.now() < (backoff.get(src) || 0)) continue;
+    const starts = [];
     // Active slots (loan/return checks) and turns waiting to be claimed (auto-claim on loan).
     for (const [, w] of entries(b)) if (w.holder) starts.push(w.holder.calledAt || w.holder.startedAt || Date.now());
     for (const a of b.awaiting || []) starts.push(a.loanAt);
+    if (!starts.length) continue;
+    const g = groups.get(src) || { cids: new Set(), starts: [] };
+    g.cids.add(cid); g.starts.push(...starts); groups.set(src, g);
   }
-  if (!starts.length) return;
+  if (!groups.size) return;
   polling = true;
   try {
-    const news = await torn.armouryNews((Math.min(...starts) - 5 * MIN) / 1000);
-    state.api.lastOkAt = Date.now();
-    state.api.lastError = null;
-    const changed = new Set();
-    for (const n of news) {
-      const ev = torn.parseArmoury(n.text);
-      if (ev) await applyArmouryEvent(ev, n.timestamp * 1000, changed, n.id);
+    for (const [src, g] of groups) {
+      const from = (Math.min(...g.starts) - 5 * MIN) / 1000;
+      try {
+        let news;
+        if (src === 'owner') {
+          news = await torn.armouryNews(from);
+          state.api.lastOkAt = Date.now();
+          state.api.lastError = null;
+        } else {
+          const key = keyOf_(src);
+          if (!key) { tranche(src).status = 'bad'; tranche(src).err = 'The saved key could not be unlocked (KEY_SECRET changed?). Add it again.'; continue; }
+          news = await torn.armouryNewsFor(key, from);
+          Object.assign(tranche(src), { status: 'ok', err: null, checkedAt: Date.now() });
+        }
+        const changed = new Set();
+        for (const n of news) {
+          const ev = torn.parseArmoury(n.text);
+          if (ev) await applyArmouryEvent(ev, n.timestamp * 1000, changed, n.id, g.cids);
+        }
+        save();
+        for (const cid of changed) queuePanelUpdate(cid);
+      } catch (err) {
+        const msg = src === 'owner' ? torn.explain(err) : keyErr(err);
+        console.error(`Armoury log check failed (${src === 'owner' ? 'owner key' : trancheName(src)}):`, msg);
+        if (src === 'owner') state.api.lastError = { msg, at: Date.now() };
+        else if (KEY_DEAD.includes(err.code)) {
+          Object.assign(tranche(src), { status: 'bad', err: msg, checkedAt: Date.now() });
+          for (const cid of g.cids) queuePanelUpdate(cid);
+        }
+        if ([0, 2, 7, 8, 10, 13, 16, 18].includes(err.code)) backoff.set(src, Date.now() + 10 * MIN);
+        else if (err.code === 5) backoff.set(src, Date.now() + 2 * MIN);
+        save();
+      }
     }
-    save();
-    for (const cid of changed) queuePanelUpdate(cid);
-  } catch (err) {
-    state.api.lastError = { msg: torn.explain(err), at: Date.now() };
-    console.error('Armoury log check failed:', torn.explain(err));
-    if ([0, 2, 7, 8, 10, 13, 16, 18].includes(err.code)) backoffUntil = Date.now() + 10 * MIN;
-    else if (err.code === 5) backoffUntil = Date.now() + 2 * MIN;
-    save();
   } finally {
     polling = false;
   }
@@ -1130,9 +1200,10 @@ function discordIdForTornName(name) {
 }
 
 // A loan of a weapon that's currently someone else's turn → a public, spooky call-out in that channel.
-async function shameOutOfTurn(ev, at, newsId) {
+async function shameOutOfTurn(ev, at, newsId, cids) {
   if (ev.type !== 'loan') return;
   for (const [cid, b] of Object.entries(state.boards)) {
+    if (cids && !cids.has(cid)) continue; // a different faction's armoury
     const same = entries(b).filter(([, w]) => torn.sameItem(ev.item, w.name));
     const held = same.filter(([, w]) => w.holder);
     if (!held.length) continue; // nobody's turn on that weapon here
@@ -1163,9 +1234,10 @@ async function shameOutOfTurn(ev, at, newsId) {
   }
 }
 
-async function applyArmouryEvent(ev, at, changed, newsId) {
-  await shameOutOfTurn(ev, at, newsId);
+async function applyArmouryEvent(ev, at, changed, newsId, cids) {
+  await shameOutOfTurn(ev, at, newsId, cids);
   for (const [cid, b] of Object.entries(state.boards)) {
+    if (cids && !cids.has(cid)) continue; // only channels whose armoury this log belongs to
     for (const [key, w] of entries(b)) {
       const h = w.holder;
       if (!h || !torn.sameItem(ev.item, w.name) || !torn.sameName(ev.person, tornName(h.userId))) continue;
@@ -1255,7 +1327,7 @@ function adminHeader(b, guild) {
   const found = adminRolesHere(guild);
   const inUse = entries(b).filter(([, w]) => w.holder).length;
   return `🛠️ **Admin controls for this channel**\n-# Only you can see this. Weapons: ${entries(b).length} (${inUse} in use) · ` +
-    `Queue: ${b.queue.length} · ${c.slot}-min slots · ${c.claim} min to claim${torn.enabled() ? ' · 🔑 API checks on' : ''}` +
+    `Queue: ${b.queue.length} · ${c.slot}-min slots · ${c.claim} min to claim · ${b.faction ? `🏷️ ${trancheName(b.faction)} ` : ''}${boardWatched(b) ? '🔑 loans auto-checked' : '🔑 no armoury key'}` +
     `\n-# 🛡️ Admin roles here: ${found.length ? found.join(', ') : 'none (only Manage Server and whitelisted users)'}`;
 }
 
@@ -1271,7 +1343,7 @@ function adminMenu(b) {
       btn('a_rmu', 'Remove member', ButtonStyle.Secondary, '🚫'),
       btn('a_move', 'Move member', ButtonStyle.Secondary, '↕️').setDisabled(emptyQueue)),
     row(btn('a_settings', 'Settings', ButtonStyle.Primary, '⚙️'),
-      btn('a_api', 'API test', ButtonStyle.Secondary, '🔑'),
+      btn('a_keys', 'API keys', ButtonStyle.Secondary, '🔑'),
       btn('a_repost', 'Re-post panel', ButtonStyle.Secondary, '📌')),
     row(btn('a_clear', 'Clear queue', ButtonStyle.Danger, '🧹').setDisabled(emptyQueue),
       btn('a_delete', 'Delete queue', ButtonStyle.Danger, '🪦')),
@@ -1285,6 +1357,73 @@ const guildOfBoard = (b) => {
 };
 const adminView = (b, note, guild = guildOfBoard(b)) =>
   ({ content: (note ? `${note}\n\n` : '') + adminHeader(b, guild), components: adminMenu(b) });
+
+// ---------- 🔑 tranche API keys ----------
+const KEY_TERMS =
+  '-# 🔒 Keys are pasted into a private pop-up, encrypted before saving, and never shown to anyone (including the bot owner). ' +
+  'There is no way to view a key, only replace or remove it.\n' +
+  '-# 📜 **Terms**: Data storage: only locally (linked Torn names, loan/return times) · Data sharing: faction (loan status on the panel) · ' +
+  'Purpose: public community tool (confirm armoury loans/returns) · Key storage: stored encrypted, used only for automation · ' +
+  'Access: Custom, faction > armorynews. [Torn API terms](https://www.torn.com/api.html)';
+
+function keysView(b, note) {
+  const lines = TRANCHES.map((fid) => {
+    const t = state.tranches[fid] || {};
+    if (!t.enc) return `❌ **${trancheName(fid)}**: no key`;
+    if (t.status === 'bad') return `⚠️ **${trancheName(fid)}**: key stopped working (${t.err || 'rejected by Torn'})`;
+    return `✅ **${trancheName(fid)}**: added by <@${t.addedBy}> ${ts(t.addedAt)}`;
+  });
+  const content = (note ? `${note}\n\n` : '') +
+    `🔑 **Tranche API keys**\n${lines.join('\n')}\n\n` +
+    `This channel uses: **${b.faction ? trancheName(b.faction) : 'not set'}**` +
+    (b.faction ? '' : torn.enabled() ? " (reads the bot owner's armoury)" : '') + '\n' +
+    "-# How to add one: press **Create key in Torn**, create it, copy it, then **Add / replace key**.\n" + KEY_TERMS;
+  const anyKey = TRANCHES.some(hasKey);
+  return {
+    content: content.slice(0, 1990),
+    components: [
+      row(new ButtonBuilder().setStyle(ButtonStyle.Link).setURL(KEY_LINK).setLabel('Create key in Torn').setEmoji('🆕'),
+        btn('a_kadd', 'Add / replace key', ButtonStyle.Success, '➕'),
+        btn('a_krm', 'Remove key', ButtonStyle.Danger, '🗑️').setDisabled(!anyKey)),
+      row(btn('a_kchan', "Set this channel's tranche", ButtonStyle.Primary, '🏷️'), btn('a_back', 'Back', ButtonStyle.Secondary, '↩️')),
+    ],
+  };
+}
+
+const trancheSelect = (id, list, extra = []) => new StringSelectMenuBuilder().setCustomId(id).setPlaceholder('Pick a tranche')
+  .addOptions([...list.map((fid) => ({
+    label: trancheName(fid).slice(0, 100), value: String(fid),
+    description: (hasKey(fid) ? (state.tranches[fid].status === 'bad' ? 'Key stopped working' : 'Key added') : 'No key yet') + ` · ID ${fid}`,
+  })), ...extra]);
+
+// Key problems explained for leaders (not the bot owner's .env).
+const keyErr = (err) => ({
+  2: 'The key is wrong, or was deleted in Torn.',
+  7: "The key's owner doesn't have faction API access.",
+  10: 'The key owner is in federal jail.',
+  13: "The key is disabled because its owner has been inactive.",
+  16: "The key doesn't include faction > armorynews.",
+  18: 'The key has been paused by its owner.',
+}[err?.code] || torn.explain(err));
+
+// Test a pasted key, check it belongs to the right faction, then save it encrypted.
+async function saveTrancheKey(fid, key, userId) {
+  if (!/^[A-Za-z0-9]{16}$/.test(key)) return '❌ That doesn\'t look like a Torn API key (16 letters and numbers). Nothing was saved.';
+  try {
+    await torn.armouryNewsFor(key, Date.now() / 1000 - 24 * 3600);
+  } catch (err) {
+    return `❌ Torn rejected that key: ${keyErr(err)} Nothing was saved.`;
+  }
+  const owner = await torn.keyFaction(key);
+  if (owner && owner !== fid) {
+    return `❌ That key belongs to **${TRANCHES.includes(owner) ? trancheName(owner) : `faction ${owner}`}**, not **${trancheName(fid)}**. Nothing was saved.`;
+  }
+  Object.assign(tranche(fid), { enc: keys.encrypt(key), addedBy: userId, addedAt: Date.now(), status: 'ok', err: null, checkedAt: Date.now() });
+  backoff.delete(fid);
+  save();
+  for (const [cid, bb] of Object.entries(state.boards)) if (bb.faction === fid) queuePanelUpdate(cid);
+  return `✅ Key saved for **${trancheName(fid)}**.` + (owner ? '' : " (I couldn't confirm which faction it belongs to, so make sure it's the right one.)");
+}
 
 // A picker screen: one select menu plus a Back button.
 const pickView = (prompt, menu) => ({ content: prompt, components: [row(menu), backRow()] });
@@ -1399,9 +1538,43 @@ async function adminInteraction(i) {
       }));
     }
 
-    case 'a_api': {
+    case 'a_api': // old panels
+    case 'a_keys': {
       await i.deferUpdate();
-      return i.editReply({ content: await apiTestText(), components: [backRow()] });
+      await refreshTrancheNames();
+      return i.editReply(keysView(b));
+    }
+    case 'a_kadd':
+      if (!keys.ready()) return i.update(keysView(b, "⚠️ The bot owner needs to set **KEY_SECRET** in Railway before keys can be saved."));
+      return i.update(pickView(`➕ Which tranche is this key for?\n${KEY_TERMS}`, trancheSelect('a_kadd_pick', TRANCHES)));
+    case 'a_kadd_pick': {
+      const fid = Number(i.values[0]);
+      return i.showModal(modalOf(`m_key|${fid}`, `API key: ${trancheName(fid)}`, [
+        textInput('key', 'Faction API key (armorynews only)', { placeholder: '16 letters and numbers', max: 16 }),
+      ]));
+    }
+    case 'a_krm': {
+      const withKey = TRANCHES.filter(hasKey);
+      if (!withKey.length) return i.update(keysView(b, 'No keys to remove.'));
+      return i.update(pickView('🗑️ Remove which tranche\'s key? Its channels stop auto-checking loans until a new key is added.', trancheSelect('a_krm_pick', withKey)));
+    }
+    case 'a_krm_pick': {
+      const fid = Number(i.values[0]);
+      const t = tranche(fid);
+      delete t.enc; delete t.addedBy; delete t.addedAt; t.status = null; t.err = null;
+      save();
+      for (const [ccid, bb] of Object.entries(state.boards)) if (bb.faction === fid) queuePanelUpdate(ccid);
+      return i.update(keysView(b, `🗑️ Key removed for **${trancheName(fid)}**.`));
+    }
+    case 'a_kchan':
+      return i.update(pickView("🏷️ Which tranche is this channel's queue for? Its armoury log is checked, and only its members can join.",
+        trancheSelect('a_kchan_pick', TRANCHES, [{ label: 'None (no tranche)', value: '0', description: 'Anyone can join · uses the bot owner\'s armoury' }])));
+    case 'a_kchan_pick': {
+      const fid = Number(i.values[0]);
+      if (fid) b.faction = fid; else delete b.faction;
+      save(cid);
+      queuePanelUpdate(cid);
+      return i.update(keysView(b, fid ? `🏷️ This channel is now for **${trancheName(fid)}**.` : '🏷️ This channel is no longer linked to a tranche.'));
     }
 
     case 'a_repost': {
@@ -1425,6 +1598,15 @@ async function adminInteraction(i) {
     }
   }
   if (id.startsWith('m_move|')) return adminDone(i, cid, opMove(cid, id.split('|')[1], Number(f('position').trim())));
+  if (id.startsWith('m_key|')) {
+    const fid = Number(id.split('|')[1]);
+    if (!TRANCHES.includes(fid)) return;
+    await i.deferUpdate(); // testing the key with Torn takes a moment
+    let key = f('key').trim();
+    const note = await saveTrancheKey(fid, key, i.user.id);
+    key = null; // don't keep the plain key around
+    return i.editReply(keysView(board(cid), note));
+  }
 }
 
 // ---------- wiring ----------
@@ -1442,10 +1624,11 @@ client.once(Events.ClientReady, async (c) => {
   }
   await emptyTrash();
   for (const t of state.trash) setTimeout(() => emptyTrash(), Math.max(0, t.at - Date.now()) + 50);
-  if (torn.enabled()) {
-    setInterval(() => pollArmoury().catch((e) => console.error(e)), API_POLL_MS);
-    console.log(`🔑 Torn API checks on (armoury log every ${API_POLL_MS / 1000}s while weapons are out)`);
-  }
+  setInterval(() => pollArmoury().catch((e) => console.error(e)), API_POLL_MS);
+  const keyed = TRANCHES.filter(hasKey).length;
+  console.log(`🔑 Armoury checks every ${API_POLL_MS / 1000}s while weapons are out · owner key: ${torn.enabled() ? 'on' : 'off'} · ` +
+    `tranche keys: ${keyed}/${TRANCHES.length}${keys.ready() ? '' : ' (KEY_SECRET not set: keys can\'t be added)'}`);
+  refreshTrancheNames().catch(() => {});
   const found = [];
   for (const gid of ids) {
     try { const g = await c.guilds.fetch(gid); await g.roles.fetch(); const r = adminRolesHere(g); if (r.length) found.push(`${g.name}: ${r.join(', ')}`); } catch { /* ignore */ }
@@ -1474,7 +1657,7 @@ client.on(Events.InteractionCreate, async (i) => {
     if (i.isAutocomplete()) return await autocomplete(i);
     if (i.isChatInputCommand()) return await command(i);
     const id = i.customId || '';
-    const isAdminUi = id === 'p_admin' || id.startsWith('a_') || id === 'm_addw' || id === 'm_settings' || id.startsWith('m_move|');
+    const isAdminUi = id === 'p_admin' || id.startsWith('a_') || id === 'm_addw' || id === 'm_settings' || id.startsWith('m_move|') || id.startsWith('m_key|');
     if (isAdminUi) return await adminInteraction(i);
     if (i.isButton()) return await (id.startsWith('p_') ? panelButton(i) : turnButton(i));
     if (i.isModalSubmit()) return await modal(i);

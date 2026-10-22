@@ -23,9 +23,9 @@ class TornError extends Error {
 }
 
 // One GET request to the Torn API. Times out after 10 s.
-async function call(path, params = {}) {
-  if (!enabled()) throw new TornError(0, 'No TORN_API_KEY set');
-  const url = new URL(API + path);
+async function call(path, params = {}, key = KEY) {
+  if (!key) throw new TornError(0, 'No TORN_API_KEY set');
+  const url = new URL((path.startsWith('http') ? '' : API) + path);
   for (const [k, v] of Object.entries(params)) {
     if (v !== undefined && v !== null) url.searchParams.set(k, String(v));
   }
@@ -34,7 +34,7 @@ async function call(path, params = {}) {
   const timer = setTimeout(() => ctrl.abort(), 10_000);
   try {
     const res = await fetch(url, {
-      headers: { Authorization: `ApiKey ${KEY}`, 'User-Agent': 'HWQueueBot/1.0' },
+      headers: { Authorization: `ApiKey ${key}`, 'User-Agent': 'HWQueueBot/1.0' },
       signal: ctrl.signal,
     });
     const json = await res.json();
@@ -59,6 +59,74 @@ async function armouryNews(fromUnix) {
     .map((n) => ({ id: String(n.id ?? `${n.timestamp}:${n.text}`), text: String(n.text ?? n.news ?? ''), timestamp: Number(n.timestamp) }))
     .filter((n) => n.text && n.timestamp)
     .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+// ---------- tranche keys (one faction key per tranche, armoury-only) ----------
+const V1 = 'https://api.torn.com';
+
+// Armoury log for a tranche key, oldest first: [{ id, text, timestamp }].
+// Prefers the armoury-only selection (faction > armorynews); falls back to
+// faction > news (armoury category) if the key was made with that instead.
+async function armouryNewsFor(key, fromUnix) {
+  try {
+    const json = await call(`${V1}/faction/`, { selections: 'armorynews', from: fromUnix ? Math.floor(fromUnix) : undefined, key }, key);
+    const raw = json.armorynews || {};
+    return Object.entries(raw)
+      .map(([id, n]) => ({ id: String(id), text: String(n?.news ?? n?.text ?? ''), timestamp: Number(n?.timestamp) }))
+      .filter((n) => n.text && n.timestamp)
+      .sort((a, b) => a.timestamp - b.timestamp);
+  } catch (err) {
+    if (err.code !== 16) throw err; // 16 = this key doesn't have armorynews: try the news selection
+    const json = await call('/faction/news', { cat: NEWS_CATEGORY, striptags: 'true', limit: 100, sort: 'desc',
+      from: fromUnix ? Math.floor(fromUnix) : undefined }, key);
+    const raw = Array.isArray(json.news) ? json.news : Object.values(json.news || {});
+    return raw.map((n) => ({ id: String(n.id ?? `${n.timestamp}:${n.text}`), text: String(n.text ?? n.news ?? ''), timestamp: Number(n.timestamp) }))
+      .filter((n) => n.text && n.timestamp).sort((a, b) => a.timestamp - b.timestamp);
+  }
+}
+
+// Which faction a key belongs to (from the key's own info, which every key can read). Null if unknown.
+async function keyFaction(key) {
+  for (const [path, params] of [['/key/info', {}], [`${V1}/key/`, { selections: 'info', key }]]) {
+    try {
+      const id = findField(await call(path, params, key), ['faction_id', 'factionId', 'factionID']);
+      if (id) return Number(id);
+    } catch { /* try the next form */ }
+  }
+  return null;
+}
+
+// A faction's public name, using the owner's key. Null if unknown.
+async function factionName(id) {
+  if (!enabled()) return null;
+  try {
+    const json = await call(`/faction/${encodeURIComponent(id)}/basic`);
+    return (json?.basic?.name || findIdName(json)?.name || null);
+  } catch { return null; }
+}
+
+// A player's faction ID (0 = not in a faction), by Torn ID or Discord ID, using the owner's key.
+// Null if it couldn't be found out.
+async function userFaction(id) {
+  if (!enabled()) return null;
+  try {
+    const json = await call(`/user/${encodeURIComponent(id)}/faction`);
+    if (json && 'faction' in json) return Number(json.faction?.id ?? json.faction?.faction_id ?? 0);
+  } catch { /* fall through */ }
+  try {
+    const json = await call(`/user/${encodeURIComponent(id)}/profile`);
+    const p = json?.profile || json;
+    const f = p?.faction_id ?? p?.faction?.id ?? p?.faction?.faction_id;
+    if (f !== undefined) return Number(f || 0);
+  } catch { /* unknown */ }
+  return null;
+}
+
+function findField(obj, names, depth = 0) {
+  if (!obj || typeof obj !== 'object' || depth > 4) return null;
+  for (const n of names) if (obj[n] !== undefined && obj[n] !== null && obj[n] !== 0) return obj[n];
+  for (const v of Object.values(obj)) { const r = findField(v, names, depth + 1); if (r) return r; }
+  return null;
 }
 
 // Look up a Torn user by Discord ID (or Torn ID). Returns { id, name } or null.
@@ -165,4 +233,4 @@ function explain(err) {
   return hints[err?.code] || err?.message || String(err);
 }
 
-module.exports = { enabled, armouryNews, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };
+module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };
