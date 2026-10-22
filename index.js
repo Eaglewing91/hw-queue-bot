@@ -798,6 +798,10 @@ function panelEmbed(b) {
       ? `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself within **${c.claim} min**. The bot auto-claims your turn.\n`
       : `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself, then press **Claim** within **${c.claim} min**.\n`) +
     `**3.** Return it after **${c.slot} min**.`,
+    // Only in channels where booking is on (and the Book button shows).
+    ...(bookingsOn(b) && maxBookable(b) > 0
+      ? ['\n📢 **Notice:** booked slots take priority over the queue. Queue times are estimates and can move back if someone has booked, so keep an eye on the 📅 Booked list below.']
+      : []),
     `\n**🗡️ Weapons (${list.length})**`,
   ];
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
