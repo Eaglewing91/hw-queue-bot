@@ -608,13 +608,11 @@ function panelEmbed(b) {
   const list = entries(b);
   const c = cfg(b);
   const parts = [
-    `**1.** Press **Join queue** and wait your turn. When a weapon frees up you'll be @'d and handed the next one.\n` +
-    `**2.** Go to the ${armouryLink()} and **loan the weapon to yourself**. The bot doesn't do this for you.\n` +
+    `**1.** Press **Join queue**. You'll be @'d when it's your turn.\n` +
     (torn.enabled()
-      ? `**3.** The bot spots your loan and claims your turn automatically, or press **Claim** on the message that tags you. ` +
-        `Do one within ${c.claim} min or the spirits give your place away.\n`
-      : `**3.** Press **Claim** on the message that tags you within ${c.claim} min, or the spirits give your place away.\n`) +
-    `**4.** Return it to the armoury when your ${c.slot} min are up.`,
+      ? `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself within **${c.claim} min**. The bot auto-claims your turn.\n`
+      : `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself, then press **Claim** within **${c.claim} min**.\n`) +
+    `**3.** Return it after **${c.slot} min**.`,
     `\n**🗡️ Weapons (${list.length})**`,
   ];
   if (!list.length) parts.push('None yet. The armoury is bare. 🕸️ Admins: `/qadmin add-weapon`.');
