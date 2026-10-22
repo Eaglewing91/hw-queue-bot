@@ -66,8 +66,9 @@ const DEFAULTS = {
   cleanup: num(process.env.CLEANUP_SECONDS, 120), // delete finished turn messages after N seconds (0 = keep)
   remind: num(process.env.RETURN_REMIND_MINUTES, 5), // API only: remind if not returned N minutes after the slot
   book: num(process.env.BOOK_MINUTES, 15),       // length of a booked slot, minutes
+  bookcool: num(process.env.BOOK_COOLDOWN_MINUTES, 60), // after a booked slot, wait this long before the next booked start (0 = off)
 };
-const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240], book: [5, 240] };
+const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240], book: [5, 240], bookcool: [0, 1440] };
 const API_POLL_MS = Math.max(15, num(process.env.API_POLL_SECONDS, 30)) * 1000; // armoury log check interval
 const MIN = 60_000;
 // Members loan weapons to themselves here (the bot only links to it; it never loans anything).
@@ -468,9 +469,9 @@ function bookingLabel(b, bk) {
 const maxBookable = (b) => Math.max(0, entries(b).length - BOOK_KEEP);
 
 // Is a start time T free for a new booking of `weapon` ('any' or 'g:…')?
-function slotFree(b, T, weapon) {
+function slotFree(b, T, weapon, ignoreId) {
   const len = cfg(b).book * MIN;
-  const overlap = bookingsOf(b).filter((x) => Math.abs(x.at - T) < len);
+  const overlap = bookingsOf(b).filter((x) => x.id !== ignoreId && Math.abs(x.at - T) < len);
   if (overlap.length >= maxBookable(b)) return false;
   if (weapon !== 'any') {
     const size = entries(b).filter(([, w]) => `g:${groupKey(w)}` === weapon).length;
@@ -480,12 +481,16 @@ function slotFree(b, T, weapon) {
 }
 
 // Start times someone can book now: on the slot grid (TCT), from 5 min ahead up to BOOK_AHEAD_MIN.
-function bookableTimes(b, weapon) {
+// Earliest start a member may book, after the cooldown from their last booked slot.
+const coolUntil = (b, userId) => (cfg(b).bookcool ? (b.lastBooked?.[userId] || 0) + cfg(b).bookcool * MIN : 0);
+
+function bookableTimes(b, weapon, userId, ignoreId) {
   const step = cfg(b).book * MIN;
   const now = Date.now();
+  const earliest = Math.max(now + 5 * MIN, coolUntil(b, userId));
   const out = [];
-  for (let T = Math.ceil((now + 5 * MIN) / step) * step; T <= now + BOOK_AHEAD_MIN * MIN && out.length < 25; T += step) {
-    if (slotFree(b, T, weapon)) out.push(T);
+  for (let T = Math.ceil(earliest / step) * step; T <= now + BOOK_AHEAD_MIN * MIN && out.length < 25; T += step) {
+    if (slotFree(b, T, weapon, ignoreId)) out.push(T);
   }
   return out;
 }
@@ -532,6 +537,7 @@ async function serveBookings(cid, b) {
     b.bookings = bookingsOf(b).filter((x) => x !== bk);
     const qp = queuePos(b, bk.userId);
     if (qp !== -1) b.queue.splice(qp, 1); // served by the booking
+    (b.lastBooked ??= {})[bk.userId] = Math.max(Date.now(), bk.at) + cfg(b).book * MIN; // cooldown runs from the end of this slot
     await callUp(cid, b, key, bk.userId, { booked: true, slotMin: cfg(b).book });
   }
   const stale = bookingsOf(b).filter((x) => now - x.at > BOOK_EXPIRE_MIN * MIN);
@@ -1151,12 +1157,13 @@ function describeSettings(b) {
     `👻 Return reminder: **${c.remind} min after the slot**${mark('remind')}` +
       (torn.enabled() ? '' : ' *(needs a Torn API key)*'),
     `📅 Booked slot length: **${c.book} min**${mark('book')}`,
+    `🧊 Booking cooldown: **${c.bookcool ? `${c.bookcool} min after a booked slot` : 'off'}**${mark('bookcool')}`,
   ].join('\n');
 }
 
 const SETTING_LABELS = {
   slot: 'Slot length (minutes)', claim: 'Time to claim (minutes)', warn: 'Warning (minutes)',
-  cleanup: 'Clean-up delay (seconds)', remind: 'Return reminder (minutes)', book: 'Booking length (minutes)',
+  cleanup: 'Clean-up delay (seconds)', remind: 'Return reminder (minutes)', book: 'Booking length (minutes)', bookcool: 'Booking cooldown (minutes)',
 };
 
 // changes: { key: number } to set, { key: null } to go back to the default, undefined = leave alone.
@@ -1212,7 +1219,7 @@ async function panelButton(i) {
     case 'p_done': return finish(i, cid);
     case 'p_me': {
       const mine = board(cid) && bookingsOf(board(cid)).find((x) => x.userId === i.user.id);
-      return i.reply({ ...eph(myStatus(cid, i.user.id)), ...(mine ? { components: [row(btn(`b_cancel|${mine.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] } : {}) });
+      return i.reply({ ...eph(myStatus(cid, i.user.id)), ...(mine ? { components: [row(btn('b_move', 'Move booking', ButtonStyle.Primary, '🔁'), btn(`b_cancel|${mine.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] } : {}) });
     }
     case 'p_book': return bookInteraction(i);
     case 'p_name': {
@@ -1253,15 +1260,22 @@ async function bookInteraction(i) {
     return reply({ content: `👻 This queue is for **${trancheName(b.faction)}** members only.`, components: [] });
   }
   const mine = bookingsOf(b).find((x) => x.userId === i.user.id);
-  if (mine) {
-    return reply({ content: `📅 You already have a booking: **${bookingLabel(b, mine)}** at **${tct(mine.at)}** (${ts(mine.at)}). One at a time.`,
-      components: [row(btn(`b_cancel|${mine.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] });
+  const moving = id === 'b_move' || id === 'b_wm' || id.startsWith('b_tm|');
+  const mineRow = (bk) => row(btn('b_move', 'Move booking', ButtonStyle.Primary, '🔁'), btn(`b_cancel|${bk.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'));
+  if (mine && !moving) {
+    return reply({ content: `📅 Your booking: **${bookingLabel(b, mine)}** at **${tct(mine.at)}** (${ts(mine.at)}).\n-# One at a time. You can move it to another time or weapon, or cancel it.`,
+      components: [mineRow(mine)] });
   }
-  const head = `📅 **Book a ${cfg(b).book}-min slot.** At your time you'll be tagged for the weapon, ahead of the queue.\n` +
+  if (moving && !mine) return reply({ content: "You don't have a booking to move.", components: [] });
+  const cool = coolUntil(b, i.user.id);
+  const coolNote = cool > Date.now() ? `\n-# 🧊 Booking cooldown: your next booked slot can start from ${ts(cool)}.` : '';
+  const head = `📅 **${moving ? 'Move your booking' : `Book a ${cfg(b).book}-min slot`}.** At your time you'll be tagged for the weapon, ahead of the queue.\n` +
     `-# Up to ${BOOK_AHEAD_MIN / 60} hours ahead · 1 booking at a time · times are Torn City Time (TCT) · ` +
-    `loan it within ${cfg(b).claim} min or the booking is released`;
+    `loan it within ${cfg(b).claim} min or the booking is released` + coolNote;
+  const wId = moving ? 'b_wm' : 'b_w';
+  const tId = moving ? 'b_tm' : 'b_t';
 
-  if (id === 'p_book') {
+  if (id === 'p_book' || id === 'b_move') {
     const groups = new Map();
     for (const [, w] of byBonus(entries(b))) if (!groups.has(groupKey(w))) groups.set(groupKey(w), groupOf(b, w));
     const opts = [{ label: 'Any weapon', value: 'any', description: 'First one free at your time (most times available)', emoji: { name: '🎲' } },
@@ -1269,34 +1283,42 @@ async function bookInteraction(i) {
         label: `${groupLabel(grp)}${grp.length > 1 ? ` ×${grp.length}` : ''}`.slice(0, 100), value: `g:${gk}`.slice(0, 100),
         description: grp.length > 1 ? 'Either copy' : undefined,
       }))];
-    const menu = new StringSelectMenuBuilder().setCustomId('b_w').setPlaceholder('Pick a weapon')
+    const menu = new StringSelectMenuBuilder().setCustomId(wId).setPlaceholder('Pick a weapon')
       .addOptions(opts.map((o) => Object.fromEntries(Object.entries(o).filter(([, v]) => v !== undefined))));
     return reply({ content: `${head}\n\n**Which weapon?**`, components: [row(menu)] });
   }
-  if (id === 'b_w') {
+  if (id === 'b_w' || id === 'b_wm') {
     const weapon = i.values[0];
-    const times = bookableTimes(b, weapon);
+    const times = bookableTimes(b, weapon, i.user.id, mine?.id);
     if (!times.length) return reply({ content: `${head}\n\nNo free times for **${weapon === 'any' ? 'any weapon' : bookingLabel(b, { weapon })}** in the next ${BOOK_AHEAD_MIN / 60} hours.`, components: [] });
-    const left = (T) => maxBookable(b) - bookingsOf(b).filter((x) => Math.abs(x.at - T) < cfg(b).book * MIN).length;
-    const menu = new StringSelectMenuBuilder().setCustomId(`b_t|${weapon}`.slice(0, 100)).setPlaceholder('Pick a start time')
+    const left = (T) => maxBookable(b) - bookingsOf(b).filter((x) => x.id !== mine?.id && Math.abs(x.at - T) < cfg(b).book * MIN).length;
+    const menu = new StringSelectMenuBuilder().setCustomId(`${tId}|${weapon}`.slice(0, 100)).setPlaceholder('Pick a start time')
       .addOptions(times.map((T) => {
         const mins = Math.round((T - Date.now()) / MIN);
         const inTxt = mins < 60 ? `in ${mins} min` : `in ${Math.floor(mins / 60)} h ${mins % 60} min`;
-        return { label: tct(T), value: String(T), description: `${inTxt} · ${left(T)} bookable` };
+        return { label: tct(T) + (mine && T === mine.at ? ' (current)' : ''), value: String(T), description: `${inTxt} · ${left(T)} bookable` };
       }));
     return reply({ content: `${head}\n\n**${weapon === 'any' ? 'Any weapon' : bookingLabel(b, { weapon })}**: pick a start time.`, components: [row(menu)] });
   }
-  if (id.startsWith('b_t|')) {
-    const weapon = id.slice(4);
+  if (id.startsWith('b_t|') || id.startsWith('b_tm|')) {
+    const weapon = id.slice(id.indexOf('|') + 1);
     const T = Number(i.values[0]);
-    if (!(T > Date.now()) || !slotFree(b, T, weapon)) return reply({ content: '⌛ That time was just taken. Press **Book a slot** again.', components: [] });
-    const bk = { id: Math.random().toString(36).slice(2, 10), userId: i.user.id, at: T, weapon, createdAt: Date.now() };
-    bookingsOf(b).push(bk);
+    const okTime = T > Date.now() && T >= coolUntil(b, i.user.id) - 1000 && slotFree(b, T, weapon, mine?.id);
+    if (!okTime) return reply({ content: '⌛ That time was just taken. Press **Book a slot** again.', components: [] });
+    let bk;
+    if (moving) {
+      Object.assign(mine, { at: T, weapon, movedAt: Date.now() });
+      bk = mine;
+    } else {
+      bk = { id: Math.random().toString(36).slice(2, 10), userId: i.user.id, at: T, weapon, createdAt: Date.now() };
+      bookingsOf(b).push(bk);
+    }
     save(cid);
     autoLink(i.user.id);
-    return reply({ content: `✅ Booked **${bookingLabel(b, bk)}** at **${tct(T)}** (${ts(T)}). I'll tag you then. ` +
+    await reply({ content: `✅ ${moving ? 'Moved to' : 'Booked'} **${bookingLabel(b, bk)}** at **${tct(T)}** (${ts(T)}). I'll tag you then. ` +
       `Loan it within ${cfg(b).claim} min or the booking is released.`,
-      components: [row(btn(`b_cancel|${bk.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] });
+      components: [mineRow(bk)] });
+    return advance(cid); // a moved booking may free up a held weapon
   }
 }
 
@@ -1654,12 +1676,12 @@ function bookAdminView(b, note) {
   const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
   return {
     content: (note ? `${note}\n\n` : '') + `📅 **Bookings in this channel: ${bookingsOn(b) ? 'on' : 'off'}**\n` +
-      `Booked slot length: **${cfg(b).book} min** · up to ${BOOK_AHEAD_MIN / 60} h ahead · 1 per member · ` +
+      `Booked slot length: **${cfg(b).book} min** · cooldown: **${cfg(b).bookcool ? `${cfg(b).bookcool} min` : 'off'}** · up to ${BOOK_AHEAD_MIN / 60} h ahead · 1 per member · ` +
       `${BOOK_KEEP} weapon always left for the queue (${maxBookable(b)} bookable at once)\n` +
       (upcoming.length ? upcoming.slice(0, 10).map((x) => `• ${tct(x.at)} · <@${x.userId}> · ${bookingLabel(b, x)}`).join('\n') : '-# No bookings yet.'),
     components: [row(
       btn('a_book_toggle', bookingsOn(b) ? 'Turn bookings off' : 'Turn bookings on', bookingsOn(b) ? ButtonStyle.Danger : ButtonStyle.Success, '📅'),
-      btn('a_book_len', 'Booking length', ButtonStyle.Secondary, '⏱️'),
+      btn('a_book_len', 'Length & cooldown', ButtonStyle.Secondary, '⏱️'),
       btn('a_back', 'Back', ButtonStyle.Secondary, '↩️'))],
   };
 }
@@ -1866,8 +1888,9 @@ async function adminInteraction(i) {
       save(cid);
       return i.update(bookAdminView(b, b.bookingOff ? '📅 Booking switched **off** (existing bookings cancelled).' : '📅 Booking switched **on**.'));
     case 'a_book_len':
-      return i.showModal(modalOf('m_booklen', 'Booking length', [
+      return i.showModal(modalOf('m_booklen', 'Booking settings (blank = default)', [
         textInput('book', 'Booked slot length (minutes)', { required: false, max: 4, value: b.settings?.book, placeholder: `Blank = default (${DEFAULTS.book})` }),
+        textInput('bookcool', 'Cooldown between bookings (minutes, 0 = off)', { required: false, max: 5, value: b.settings?.bookcool, placeholder: `Blank = default (${DEFAULTS.bookcool})` }),
       ]));
 
     case 'a_repost': {
@@ -1891,9 +1914,9 @@ async function adminInteraction(i) {
     }
   }
   if (id === 'm_booklen') {
-    const v = f('book').trim();
-    const r = opSettings(cid, { book: v === '' ? null : Number(v) });
-    return i.update(bookAdminView(board(cid), r.text.startsWith('⚙️') ? `⏱️ Booked slots are now **${cfg(board(cid)).book} min**.` : r.text));
+    const val = (k) => { const v = f(k).trim(); return v === '' ? null : Number(v); };
+    const r = opSettings(cid, { book: val('book'), bookcool: val('bookcool') });
+    return i.update(bookAdminView(board(cid), r.text.startsWith('⚙️') ? '⏱️ Booking settings updated.' : r.text));
   }
   if (id.startsWith('m_move|')) return adminDone(i, cid, opMove(cid, id.split('|')[1], Number(f('position').trim())));
   if (id.startsWith('m_key|')) {

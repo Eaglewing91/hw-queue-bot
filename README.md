@@ -206,5 +206,6 @@ Members can press **📅 Book a slot** on the panel, pick **Any weapon** or a sp
 - At their time they're tagged for that weapon **ahead of the queue** and loan it as usual (auto-claimed). Miss the claim window and the booking is released.
 - Queue turns that would run into a booking are cut short to end at the booking time; if that would leave under ~7 minutes, the weapon is held for the booking instead.
 - 1 booking per member at a time. One weapon is always left for the walk-up queue, so with 3 weapons at most 2 can be booked for the same time. Identical copies (e.g. two MP5 Navy) are booked as a pair, "either one".
-- Bookings show on the panel and in **📋 My status**, with a Cancel button.
-- Admins: 🛠️ **Admin** → 📅 **Bookings** to turn booking on/off for the channel and change the booked slot length (default 15 min).
+- Bookings show on the panel and in **📋 My status**, with **🔁 Move booking** (another time or weapon) and **Cancel**.
+- **Cooldown:** after a booked slot, a member's next booked slot can't start until the cooldown has passed (default 60 min, 0 = off).
+- Admins: 🛠️ **Admin** → 📅 **Bookings** to turn booking on/off for the channel and change the booked slot length (default 15 min) and the cooldown.
