@@ -50,7 +50,12 @@ const roleKey = (s) => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 const listEnv = (v, d) => String(v ?? d).split(',').map((x) => x.trim()).filter(Boolean);
 const ADMIN_ROLE_KEYWORDS = listEnv(process.env.ADMIN_ROLE_KEYWORDS ?? process.env.ADMIN_ROLE_NAMES, 'Leader,Council')
   .map(roleKey).filter(Boolean);
-const isAdminRoleName = (name) => { const k = roleKey(name); return !!k && ADMIN_ROLE_KEYWORDS.some((kw) => k.includes(kw)); };
+// Roles that would match a keyword but must NOT get admin (e.g. allied groups' leaders).
+const ADMIN_ROLE_EXCLUDE = listEnv(process.env.ADMIN_ROLE_EXCLUDE, 'White Rabbits,NPO,External').map(roleKey).filter(Boolean);
+const isAdminRoleName = (name) => {
+  const k = roleKey(name);
+  return !!k && ADMIN_ROLE_KEYWORDS.some((kw) => k.includes(kw)) && !ADMIN_ROLE_EXCLUDE.some((x) => k.includes(x));
+};
 // Names of the roles in this server that count as admin (for the admin panel and startup log).
 function adminRolesHere(guild) {
   const roles = [...(guild?.roles?.cache?.values?.() || [])];
@@ -2011,7 +2016,7 @@ client.once(Events.ClientReady, async (c) => {
   for (const gid of ids) {
     try { const g = await c.guilds.fetch(gid); await g.roles.fetch(); const r = adminRolesHere(g); if (r.length) found.push(`${g.name}: ${r.join(', ')}`); } catch { /* ignore */ }
   }
-  console.log(`🛡️ Admins: Manage Server, roles containing [${ADMIN_ROLE_KEYWORDS.join(', ')}]` +
+  console.log(`🛡️ Admins: Manage Server, roles containing [${ADMIN_ROLE_KEYWORDS.join(', ')}] except [${ADMIN_ROLE_EXCLUDE.join(', ')}]` +
     `${ADMIN_ROLE_ID ? `, role ${ADMIN_ROLE_ID}` : ''}, ${ADMIN_USER_IDS.size} whitelisted user(s)`);
   console.log(`🛡️ Servers: ${ids.size}. Admin roles found: ${found.length ? found.join(' | ') : 'none yet'}`);
   console.log(`💀 The Necromancer has risen: logged in as ${c.user.tag}, ${Object.keys(state.boards).length} channel queue(s) loaded`);
