@@ -2,7 +2,7 @@
 
 By **Eaglewing [571041]**
 
-A Discord bot that runs Halloween-event queues for your faction's Revitalize weapons. **Every channel gets its own independent queue**: its own weapon pool, waiting line and clickable panel. Members join the queue, and whenever a weapon in that channel frees up, the next person in line is @'d and given it for a 10-minute slot. Members can't pick a specific weapon.
+A Discord bot that runs Halloween-event queues for your faction's Revitalize weapons. **Every channel gets its own independent queue**: its own weapon pool, waiting line and clickable panel. Members join the queue, and whenever a weapon in that channel frees up, the next person in line is @'d and given it for a 15-minute slot (by default). Members can't pick a specific weapon.
 
 Members loan the weapon to themselves from the faction armoury and return it by hand. The bot never loans or retrieves anything. With an optional Torn API key, it reads the faction armoury log to **confirm loans and returns** (see [Torn API loan checks](#torn-api-loan-checks-optional)).
 
@@ -12,7 +12,7 @@ Members loan the weapon to themselves from the faction armoury and return it by 
 2. When a weapon in that channel is free, the bot gives it to the next person in line and **@mentions them**, naming the weapon.
    **Members loan the weapon to themselves** in the [faction armoury](https://www.torn.com/factions.php?step=your&type=1#/tab=armoury&start=0&sub=weapons). The bot links there but never loans anything.
 3. They have **2 minutes** to press **🙋 Claim** on that @ message. Claim only appears there, not on the panel, so the tag is where you act. If they don't, they lose their place and the next person is called. They can also press **Pass**.
-4. Claiming starts their **10-minute slot**. They take that weapon from the faction armoury.
+4. Claiming starts their **15-minute slot**. They take that weapon from the faction armoury.
 5. At 2 minutes left they get a ping. At 0 they're pinged to return it, and the next person is @'d.
 6. **🏁 Finished** hands the weapon on early. **👋 Leave queue** leaves the line or ends a turn.
 

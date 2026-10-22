@@ -59,7 +59,7 @@ const ADMIN_USER_IDS = new Set(listEnv(process.env.ADMIN_USER_IDS, ''));
 const num = (v, d) => (v === undefined || v === '' || Number.isNaN(Number(v)) ? d : Number(v));
 // Defaults for new channels. Each channel can override these with /qadmin settings.
 const DEFAULTS = {
-  slot: num(process.env.SLOT_MINUTES, 10),       // slot length, minutes
+  slot: num(process.env.SLOT_MINUTES, 15),       // slot length, minutes
   claim: num(process.env.CLAIM_MINUTES, 2),      // time to press Claim, minutes
   warn: num(process.env.WARN_MINUTES, 2),        // "time almost up" ping, minutes before the end (0 = off)
   cleanup: num(process.env.CLEANUP_SECONDS, 120), // delete finished turn messages after N seconds (0 = keep)
