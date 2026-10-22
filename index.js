@@ -225,6 +225,14 @@ function groupLabel(list) {
 }
 // Label for a weapon as members should see it: "MP5 Navy (Revitalize 12–14%)" when grouped.
 const gl = (b, w) => (b ? groupLabel(groupOf(b, w)) : wl(w));
+// Short UID note for the one-line tag message: " · UID 123" or " · UIDs 123 (14%), 456 (12%)".
+function uidInline(b, w) {
+  if (b && isGroup(b, w)) {
+    const ids = groupOf(b, w).filter(([, x]) => x.uid).map(([, x]) => `${x.uid} (${x.percent}%)`);
+    return ids.length ? ` · UIDs ${ids.join(', ')}` : '';
+  }
+  return w.uid ? ` · UID ${w.uid}` : '';
+}
 // Which exact weapon(s) to take: one UID, or every copy's UID with its % when grouped.
 function uidNoteFor(b, w) {
   if (b && isGroup(b, w)) {
@@ -451,11 +459,8 @@ async function advance(cid) {
       save(cid);
       schedule(cid, key);
       const msg = await send(cid,
-        `🎃 ${who(next.userId)}, ${pick(SPOOK.up)} You've been given **${gl(b, w)}**.` +
-        (isGroup(b, w) ? ' **Take either one**; both count.\n' : '\n') +
-        `👉 Loan it to yourself in the ${armouryLink()}, then ` +
-        (boardWatched(b) ? `the bot claims your turn automatically (or press **Claim**)` : `press **Claim**`) +
-        `. Do it ${ts(claimBy)} or you'll lose your place in the queue.${uidNoteFor(b, w)}`,
+        `🎃 <@${next.userId}> → **${gl(b, w)}**${isGroup(b, w) ? ' (either one)' : ''} · ` +
+        `[loan it](${ARMOURY_URL}) ${ts(claimBy)}${boardWatched(b) ? '' : ', then press **Claim**'}${uidInline(b, w)}`,
         claimRow(key, next.userId));
       if (msg && w.holder?.userId === next.userId) { w.holder.msgId = msg.id; save(); }
     }
