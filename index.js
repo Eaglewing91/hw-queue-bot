@@ -1382,7 +1382,7 @@ function adminMenu(b) {
       btn('a_rmw', 'Remove weapon', ButtonStyle.Secondary, '➖').setDisabled(noWeapons),
       btn('a_skip', 'Skip a turn', ButtonStyle.Secondary, '⏭️').setDisabled(noneHeld)),
     row(btn('a_addu', 'Add member', ButtonStyle.Secondary, '👤'),
-      btn('a_rmu', 'Remove member', ButtonStyle.Secondary, '🚫'),
+      btn('a_rmu', 'Remove member', ButtonStyle.Secondary, '🚫').setDisabled(emptyQueue && noneHeld),
       btn('a_move', 'Move member', ButtonStyle.Secondary, '↕️').setDisabled(emptyQueue)),
     row(btn('a_settings', 'Settings', ButtonStyle.Primary, '⚙️'),
       btn('a_keys', 'API keys', ButtonStyle.Secondary, '🔑'),
@@ -1480,6 +1480,36 @@ function weaponSelect(id, list, showHolder = false) {
     })));
 }
 
+// Display name for a member in pickers: Torn name, else their server nickname, else their ID.
+async function memberLabel(guild, userId) {
+  if (tornName(userId)) return tornName(userId);
+  try { const m = await guild?.members?.fetch?.(userId); return m?.displayName || m?.user?.username || userId; } catch { return userId; }
+}
+
+// Picker of the people actually in this channel's queue (and, optionally, those holding a weapon).
+// Names are looked up in parallel with a short time limit, since Discord needs an answer within 3 s.
+async function queueSelect(id, b, guild, withHolders = false) {
+  const rows = [];
+  if (withHolders) {
+    for (const [, w] of entries(b)) if (w.holder) rows.push({ userId: w.holder.userId, desc: `${isActive(w.holder) ? 'Using' : 'Up for'} ${wl(w)}` });
+  }
+  b.queue.forEach((q, n) => rows.push({ userId: q.userId, pos: n + 1, desc: 'Waiting in the queue' }));
+  const list = rows.slice(0, 25);
+  const quick = (uid) => Promise.race([memberLabel(guild, uid), new Promise((r) => setTimeout(() => r(tornName(uid) || `Member ${uid}`), 1500))]);
+  const names = await Promise.all(list.map((r) => quick(r.userId)));
+  return new StringSelectMenuBuilder().setCustomId(id).setPlaceholder('Pick a member')
+    .addOptions(list.map((r, n) => ({ label: `${r.pos ? `#${r.pos} ` : ''}${names[n]}`.slice(0, 100), value: r.userId, description: r.desc.slice(0, 100) })));
+}
+
+// Can this member see the queue's channel? true / false / null (couldn't check).
+async function canSeeChannel(i, userId) {
+  try {
+    const m = await i.guild?.members?.fetch?.(userId);
+    if (!m) return null;
+    return !!i.channel?.permissionsFor?.(m)?.has?.(PermissionFlagsBits.ViewChannel);
+  } catch { return null; }
+}
+
 const userSelect = (id) => new UserSelectMenuBuilder().setCustomId(id).setPlaceholder('Pick a member').setMaxValues(1);
 
 function textInput(id, label, { placeholder, value, required = true, max = 40 } = {}) {
@@ -1557,12 +1587,24 @@ async function adminInteraction(i) {
     case 'a_skip_pick': return adminDone(i, cid, opSkip(cid, i.values[0]));
 
     case 'a_addu': return i.update(pickView('👤 Who should be added to the back of the queue?', userSelect('a_addu_pick')));
-    case 'a_addu_pick': return adminDone(i, cid, enqueue(cid, i.values[0], true));
+    case 'a_addu_pick': {
+      if ((await canSeeChannel(i, i.values[0])) === false) {
+        return i.update(adminView(b, `<@${i.values[0]}> can't see this channel, so they weren't added.`));
+      }
+      if (b.faction && (await inTranche(b, i.values[0])) === false) {
+        return i.update(adminView(b, `<@${i.values[0]}> isn't in **${trancheName(b.faction)}**, so they weren't added.`));
+      }
+      return adminDone(i, cid, enqueue(cid, i.values[0], true));
+    }
 
-    case 'a_rmu': return i.update(pickView('🚫 Who should be removed? (If they have a weapon, their turn ends.)', userSelect('a_rmu_pick')));
+    case 'a_rmu':
+      if (!b.queue.length && !entries(b).some(([, w]) => w.holder)) return i.update(adminView(b, 'Nobody is in this queue.'));
+      return i.update(pickView('🚫 Who should be removed? (If they have a weapon, their turn ends.)', await queueSelect('a_rmu_pick', b, i.guild, true)));
     case 'a_rmu_pick': return adminDone(i, cid, opRemoveUser(cid, i.values[0]));
 
-    case 'a_move': return i.update(pickView('↕️ Who should be moved?', userSelect('a_move_pick')));
+    case 'a_move':
+      if (!b.queue.length) return i.update(adminView(b, 'Nobody is waiting in the queue.'));
+      return i.update(pickView('↕️ Who should be moved?', await queueSelect('a_move_pick', b, i.guild)));
     case 'a_move_pick': {
       const uid = i.values[0];
       const pos = queuePos(b, uid);
