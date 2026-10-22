@@ -177,7 +177,11 @@ const SPOOK = {
 //   trash: [{ channelId, msgId, at }]     // turn messages waiting to be deleted
 // }
 let state = {};
-try { state = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { /* first run */ }
+function loadState() {
+  try { state = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')); } catch { /* first run */ }
+  fillState();
+}
+function fillState() {
 state.boards ??= {};
 state.names ??= {};
 state.trash ??= [];
@@ -185,6 +189,8 @@ state.links ??= {};
 state.api ??= {};
 state.tranches ??= {}; // { [factionId]: { name, enc, addedBy, addedAt, status, err, checkedAt } }
 state.shamed ??= []; // armoury log entries already called out, so each loan is shamed once
+}
+loadState();
 
 // Write to disk; if a channel is given, refresh its panel too.
 function save(cid) {
@@ -200,6 +206,8 @@ const ensureBoard = (cid) => (state.boards[cid] ??= { weapons: {}, queue: [], aw
 const cfg = (b) => ({ ...DEFAULTS, ...(b?.settings || {}) });
 
 // ---------- helpers ----------
+let shuttingDown = false; // set when Railway stops this copy (deploys)
+let booted = !!process.env.HWQ_TEST; // set once startup has settled (see ClientReady); offline tests start ready
 const keyOf = (s) => String(s || '').trim().toLowerCase();
 const ts = (ms, style = 'R') => `<t:${Math.floor(ms / 1000)}:${style}>`;
 const eph = (content) => ({ content, flags: MessageFlags.Ephemeral });
@@ -339,12 +347,18 @@ async function chan(cid) {
   try { return await client.channels.fetch(cid); } catch { return null; }
 }
 
+// Messages still being posted, so a shutdown can wait for them (and save their IDs) first.
+const inFlight = new Set();
 async function send(cid, content, components = []) {
   const ch = await chan(cid);
-  try {
-    // SuppressEmbeds: no big link-preview card under the armoury link.
-    return await ch.send({ content, components, allowedMentions: { parse: ['users'] }, flags: MessageFlags.SuppressEmbeds });
-  } catch (err) { console.error(`Failed to post in ${cid}:`, err.message); }
+  const p = (async () => {
+    try {
+      // SuppressEmbeds: no big link-preview card under the armoury link.
+      return await ch.send({ content, components, allowedMentions: { parse: ['users'] }, flags: MessageFlags.SuppressEmbeds });
+    } catch (err) { console.error(`Failed to post in ${cid}:`, err.message); }
+  })();
+  inFlight.add(p);
+  try { return await p; } finally { inFlight.delete(p); }
 }
 
 async function editMsg(cid, msgId, content, components = []) {
@@ -547,7 +561,7 @@ async function serveBookings(cid, b) {
 
 async function advance(cid) {
   const b = board(cid);
-  if (!b || advancing.has(cid) || !isOpen(b)) return;
+  if (!b || advancing.has(cid) || !isOpen(b) || shuttingDown || !booted) return;
   advancing.add(cid);
   try {
     await serveBookings(cid, b);
@@ -1933,12 +1947,41 @@ async function adminInteraction(i) {
 }
 
 // ---------- wiring ----------
+// Stray turn messages from a deploy hand-over: a "🎃/📅 @member → weapon" message the bot posted
+// but never recorded. If that member's turn has no message recorded, adopt it; otherwise delete it.
+async function sweepOrphans(cid) {
+  const b = board(cid);
+  if (!b) return;
+  try {
+    const channel = await chan(cid);
+    const recent = await channel.messages.fetch({ limit: 50 });
+    const tracked = new Set([b.panelId, ...state.trash.map((t) => t.msgId)]);
+    for (const [, w] of entries(b)) if (w.holder) { tracked.add(w.holder.msgId); for (const x of w.holder.extra || []) tracked.add(x); }
+    for (const a of b.awaiting || []) tracked.add(a.remindMsg);
+    for (const m of recent.values()) {
+      if (m.author?.id !== client.user?.id || tracked.has(m.id) || !/^(🎃|📅) <@\d+>/.test(m.content || '')) continue;
+      const uid = m.content.match(/<@(\d+)>/)?.[1];
+      const turn = entries(b).find(([, w]) => w.holder?.userId === uid && !w.holder.msgId);
+      if (turn) { turn[1].holder.msgId = m.id; save(); continue; }
+      await m.delete().catch(() => {});
+      console.log(`🧹 Removed a stray turn message in ${cid}`);
+    }
+  } catch (err) { console.error(`Stray message check failed in ${cid}:`, err.message); }
+}
+
 client.once(Events.ClientReady, async (c) => {
+  // During a deploy the old copy is still finishing for a few seconds. Wait, then reload what it saved.
+  if (!process.env.HWQ_TEST) {
+    await new Promise((r) => setTimeout(r, 8000));
+    loadState();
+  }
   // Slash commands go to every server the bot is in (and to new ones as it's added, below).
   const ids = new Set([...(c.guilds?.cache?.keys?.() || [])]);
   if (GUILD_ID) ids.add(GUILD_ID);
   for (const gid of ids) await registerCommands(c, gid);
+  booted = true;
   for (const cid of Object.keys(state.boards)) {
+    await sweepOrphans(cid);
     for (const key of Object.keys(state.boards[cid].weapons)) {
       if (state.boards[cid].weapons[key].holder) schedule(cid, key);
     }
@@ -1983,6 +2026,10 @@ client.on(Events.GuildCreate, async (g) => {
 
 client.on(Events.InteractionCreate, async (i) => {
   try {
+    if (!booted || shuttingDown) {
+      if (i.isAutocomplete()) return await i.respond([]).catch(() => {});
+      return await i.reply(eph('🔄 The Necromancer is restarting for an update. Try again in a few seconds.')).catch(() => {});
+    }
     if (i.isAutocomplete()) return await autocomplete(i);
     if (i.isChatInputCommand()) return await command(i);
     const id = i.customId || '';
@@ -2001,12 +2048,14 @@ client.on(Events.InteractionCreate, async (i) => {
 
 // Clean shutdown: Railway sends SIGTERM when it replaces or stops the bot during a deploy.
 // Save, disconnect and exit 0, so a normal redeploy isn't reported as a crash.
-let shuttingDown = false;
 for (const sig of ['SIGTERM', 'SIGINT']) {
   process.on(sig, async () => {
     if (shuttingDown) return;
     shuttingDown = true;
-    console.log(`💤 The Necromancer rests (${sig}): saving and logging out`);
+    console.log(`💤 The Necromancer rests (${sig}): finishing messages, saving and logging out`);
+    // Let messages that are mid-send finish, so their IDs get saved (max 5 s).
+    await Promise.race([Promise.allSettled([...inFlight]), new Promise((r) => setTimeout(r, 5000))]);
+    await new Promise((r) => setTimeout(r, 300)); // let the code after each send record the message ID
     try { save(); } catch { /* ignore */ }
     try { await client.destroy(); } catch { /* ignore */ }
     process.exit(0);
