@@ -477,6 +477,8 @@ const BOOK_SOONEST_MIN = num(process.env.BOOK_MIN_AHEAD_MINUTES, 60); // and no 
 const BOOK_MIN_SHORT = 5;       // don't start a queue turn shorter than this (minutes); hold the weapon
 const BOOK_EXPIRE_MIN = 60;     // a booking still unserved this long after its time is dropped
 const bookingsOn = (b) => !b?.bookingOff;
+// A channel can run bookings only: no walk-up queue, every weapon bookable.
+const queueOn = (b) => !b?.queueOff;
 const bookingsOf = (b) => (b.bookings ??= []);
 const tct = (ms) => new Date(ms).toISOString().slice(11, 16) + ' TCT';
 const tctIn = (ms) => `${tct(ms)} (${ts(ms)})`; // "18:00 TCT (in 42 minutes)"
@@ -487,7 +489,7 @@ function bookingLabel(b, bk) {
   const grp = entries(b).filter(([, w]) => `g:${groupKey(w)}` === bk.weapon);
   return grp.length ? groupLabel(byBonus(grp)) : 'a removed weapon';
 }
-const maxBookable = (b) => Math.max(0, entries(b).length - Math.round(cfg(b).bookkeep));
+const maxBookable = (b) => Math.max(0, entries(b).length - (queueOn(b) ? Math.round(cfg(b).bookkeep) : 0));
 
 // Is a start time T free for a new booking of `weapon` ('any' or 'g:…')?
 function slotFree(b, T, weapon, ignoreId) {
@@ -573,7 +575,7 @@ async function advance(cid) {
     await serveBookings(cid, b);
     const slotMs = cfg(b).slot * MIN;
     for (const [key, w] of byBonus(entries(b))) {
-      if (w.holder || !b.weapons[key] || !b.queue.length) continue;
+      if (w.holder || !b.weapons[key] || !b.queue.length || !queueOn(b)) continue;
       // Is this weapon needed for a booking before a full turn would end?
       const bk = planBookings(b, Date.now() + slotMs + cfg(b).claim * MIN).get(key);
       let capEnd;
@@ -673,6 +675,7 @@ function enqueue(cid, userId, byAdmin = false) {
   const b = board(cid);
   if (!b) return { text: NO_BOARD };
   if (!isOpen(b)) return { text: LOCKED };
+  if (!queueOn(b)) return { text: '📅 This channel is **bookings only**. Press **Book a slot** to reserve a time.' };
   const you = byAdmin ? `<@${userId}> is` : "You're";
   const held = heldBy(b, userId);
   if (held) return { text: `${you} already ${isActive(held[1].holder) ? 'using' : 'up for'} **${wl(held[1])}**.` };
@@ -792,7 +795,15 @@ function panelEmbed(b) {
       .setDescription("⚠️ **This queue isn't set up yet.**\nAn admin needs to pick this channel's tranche: " +
         "🛠️ **Admin** → 🔑 **API keys** → 🏷️ **Set this channel's tranche**.\n\n-# The spirits are waiting. Joining opens once it's set.");
   }
-  const parts = [
+  const bookOnly = !queueOn(b);
+  const parts = bookOnly ? [
+    `📅 **Bookings only.** There's no walk-up queue in this channel.\n` +
+    `**1.** Press **Book a slot** and pick a weapon and a start time (TCT).\n` +
+    `**2.** At your time you'll be @'d. [Loan the weapon](${ARMOURY_URL}) to yourself within **${c.claim} min**` +
+    `${boardWatched(b) ? '. The bot auto-claims your turn.' : ', then press **Claim**.'}\n` +
+    `**3.** Return it after **${c.book} min**.`,
+    `\n**🗡️ Weapons (${list.length})**`,
+  ] : [
     `**1.** Press **Join queue**. You'll be @'d when it's your turn.\n` +
     (boardWatched(b)
       ? `**2.** [Loan the weapon](${ARMOURY_URL}) to yourself within **${c.claim} min**. The bot auto-claims your turn.\n`
@@ -827,16 +838,19 @@ function panelEmbed(b) {
   }
 
   const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
+  if (bookOnly && !upcoming.length) parts.push('\n**📅 Booked (0)**\nNo bookings yet. Every slot is free. 🕯️');
   if (upcoming.length) {
     parts.push(`\n**📅 Booked (${upcoming.length})**`);
     for (const bk of upcoming.slice(0, 5)) parts.push(`${tct(bk.at)} · ${who(bk.userId)} · ${bookingLabel(b, bk)} · ${ts(bk.at)}`);
     if (upcoming.length > 5) parts.push(`-# …and ${upcoming.length - 5} more. Press **Book a slot** to see free times.`);
   }
-  parts.push(`\n**⚰️ Queue (${b.queue.length})**`);
-  if (!b.queue.length) parts.push(SPOOK.empty[Math.floor(Date.now() / 3_600_000) % SPOOK.empty.length]);
-  const times = etas(b, Math.min(b.queue.length, QUEUE_SHOWN));
-  b.queue.slice(0, QUEUE_SHOWN).forEach((e, n) => parts.push(`${n + 1}. ${who(e.userId)}, ~${tctIn(times[n])}`));
-  if (b.queue.length > QUEUE_SHOWN) parts.push(`…and ${b.queue.length - QUEUE_SHOWN} more lost souls`);
+  if (!bookOnly) {
+    parts.push(`\n**⚰️ Queue (${b.queue.length})**`);
+    if (!b.queue.length) parts.push(SPOOK.empty[Math.floor(Date.now() / 3_600_000) % SPOOK.empty.length]);
+    const times = etas(b, Math.min(b.queue.length, QUEUE_SHOWN));
+    b.queue.slice(0, QUEUE_SHOWN).forEach((e, n) => parts.push(`${n + 1}. ${who(e.userId)}, ~${tctIn(times[n])}`));
+    if (b.queue.length > QUEUE_SHOWN) parts.push(`…and ${b.queue.length - QUEUE_SHOWN} more lost souls`);
+  }
 
   if (b.awaiting?.length) {
     parts.push(`\n**👻 Not returned yet (${b.awaiting.length})**`);
@@ -858,8 +872,8 @@ function panelComponents(b) {
   const locked = !isOpen(b);
   return [
     new ActionRowBuilder().addComponents(
-      btn('p_join', 'Join queue', ButtonStyle.Success, '🎃').setDisabled(locked),
-      btn('p_leave', 'Leave queue', ButtonStyle.Danger, '👋'),
+      ...(queueOn(b) ? [btn('p_join', 'Join queue', ButtonStyle.Success, '🎃').setDisabled(locked),
+        btn('p_leave', 'Leave queue', ButtonStyle.Danger, '👋')] : []),
       ...(bookingsOn(b) && maxBookable(b) > 0 ? [btn('p_book', 'Book a slot', ButtonStyle.Primary, '📅').setDisabled(locked)] : []),
     ),
     new ActionRowBuilder().addComponents(
@@ -879,6 +893,7 @@ const panelPayload = (b) => ({ content: '', embeds: [panelEmbed(b)], components:
 // chat never move it; they just edit it in place.
 const panelTimers = {};
 const lastQueue = {}; // cid -> user IDs in queue order at the last panel update
+const lastBookings = {}; // cid -> bookings signature at the last panel update
 function queuePanelUpdate(cid) {
   if (panelTimers[cid] || !board(cid)?.panelId) return;
   panelTimers[cid] = setTimeout(() => { delete panelTimers[cid]; flushPanel(cid); }, 1500);
@@ -891,7 +906,12 @@ async function flushPanel(cid) {
   const before = lastQueue[cid] ?? now;
   lastQueue[cid] = now;
   // Positions changed unless the old queue is still the front of the new one (only joins at the back).
-  const moved = before.length > 0 && before.some((u, n) => now[n] !== u);
+  const queueMoved = before.length > 0 && before.some((u, n) => now[n] !== u);
+  // Bookings made, moved, cancelled or served also bring the panel down to the bottom.
+  const bookSig = bookingsOf(b).map((x) => `${x.id}@${x.at}:${x.weapon}`).sort().join(',');
+  const bookChanged = lastBookings[cid] !== undefined && lastBookings[cid] !== bookSig;
+  lastBookings[cid] = bookSig;
+  const moved = queueMoved || bookChanged;
   if (moved) {
     try {
       const channel = await chan(cid);
@@ -1605,7 +1625,7 @@ function adminHeader(b, guild) {
   const found = adminRolesHere(guild);
   const inUse = entries(b).filter(([, w]) => w.holder).length;
   return `🛠️ **Admin controls for this channel**\n-# Only you can see this. Weapons: ${entries(b).length} (${inUse} in use) · ` +
-    `Queue: ${b.queue.length} · ${c.slot}-min slots · ${c.claim} min to claim · ${b.faction ? `🏷️ ${trancheName(b.faction)} ` : ''}${boardWatched(b) ? '🔑 loans auto-checked' : '🔑 no armoury key'}` +
+    `Queue: ${b.queue.length} · ${c.slot}-min slots · ${c.claim} min to claim · ${queueOn(b) ? '' : '📅 bookings only · '}${b.faction ? `🏷️ ${trancheName(b.faction)} ` : ''}${boardWatched(b) ? '🔑 loans auto-checked' : '🔑 no armoury key'}` +
     `\n-# 🛡️ Admin roles here: ${found.length ? found.join(', ') : 'none (only Manage Server and whitelisted users)'}`;
 }
 
@@ -1707,14 +1727,16 @@ async function saveTrancheKey(fid, key, userId) {
 function bookAdminView(b, note) {
   const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
   return {
-    content: (note ? `${note}\n\n` : '') + `📅 **Bookings in this channel: ${bookingsOn(b) ? 'on' : 'off'}**\n` +
+    content: (note ? `${note}\n\n` : '') + `📅 **Bookings in this channel: ${bookingsOn(b) ? 'on' : 'off'}** · ` +
+      `🎃 **Walk-up queue: ${queueOn(b) ? 'on' : 'off (bookings only)'}**\n` +
       `Booked slot length: **${cfg(b).book} min** · cooldown: **${cfg(b).bookcool ? `${cfg(b).bookcool} min` : 'off'}** · ${BOOK_SOONEST_MIN / 60}–${BOOK_AHEAD_MIN / 60} h ahead · 1 per member · ` +
       `${cfg(b).bookkeep} weapon(s) always left for the queue (${maxBookable(b)} of ${entries(b).length} bookable at once)\n` +
       (upcoming.length ? upcoming.slice(0, 10).map((x) => `• ${tct(x.at)} · <@${x.userId}> · ${bookingLabel(b, x)}`).join('\n') : '-# No bookings yet.'),
     components: [row(
       btn('a_book_toggle', bookingsOn(b) ? 'Turn bookings off' : 'Turn bookings on', bookingsOn(b) ? ButtonStyle.Danger : ButtonStyle.Success, '📅'),
       btn('a_book_len', 'Booking settings', ButtonStyle.Secondary, '⏱️'),
-      btn('a_back', 'Back', ButtonStyle.Secondary, '↩️'))],
+      btn('a_queue_toggle', queueOn(b) ? 'Turn queue off (bookings only)' : 'Turn queue back on', queueOn(b) ? ButtonStyle.Secondary : ButtonStyle.Success, '🎃')),
+      row(btn('a_back', 'Back', ButtonStyle.Secondary, '↩️'))],
   };
 }
 
@@ -1914,7 +1936,22 @@ async function adminInteraction(i) {
     }
 
     case 'a_book': return i.update(bookAdminView(b));
+    case 'a_queue_toggle': {
+      if (queueOn(b)) {
+        if (!bookingsOn(b)) return i.update(bookAdminView(b, '⚠️ Turn bookings on first, or nobody could get a weapon in this channel.'));
+        const n = b.queue.length;
+        b.queueOff = true;
+        b.queue = [];
+        save(cid);
+        return i.update(bookAdminView(b, `🎃 Walk-up queue switched **off**. This channel is now **bookings only**${n ? ` (${n} waiting member${n === 1 ? '' : 's'} removed from the queue)` : ''}. Anyone mid-turn keeps their turn.`));
+      }
+      delete b.queueOff;
+      save(cid);
+      await i.update(bookAdminView(b, '🎃 Walk-up queue switched back **on**.'));
+      return advance(cid);
+    }
     case 'a_book_toggle':
+      if (bookingsOn(b) && !queueOn(b)) return i.update(bookAdminView(b, '⚠️ This channel is bookings only. Turn the walk-up queue back on before switching bookings off.'));
       b.bookingOff = bookingsOn(b);
       if (b.bookingOff) b.bookings = [];
       save(cid);

@@ -208,4 +208,6 @@ Members can press **📅 Book a slot** on the panel, pick **Any weapon** or a sp
 - 1 booking per member at a time. By default one weapon is always left for the walk-up queue, so with 3 weapons at most 2 can be booked for the same time (admins can set this to 0 so single-weapon channels can be booked). Identical copies (e.g. two MP5 Navy) are booked as a pair, "either one".
 - Bookings show on the panel and in **📋 My status**, with **🔁 Move booking** (another time or weapon) and **Cancel**.
 - **Cooldown:** after a booked slot, a member's next booked slot can't start until the cooldown has passed (default 60 min, 0 = off).
+- **Bookings only:** 🛠️ **Admin** → 📅 **Bookings** → 🎃 **Turn queue off** removes the walk-up queue from that channel. Every weapon becomes bookable and the panel only offers **Book a slot**.
+- The panel moves to the bottom of the channel whenever bookings are made, moved, cancelled or called up (as it does when queue positions change).
 - Admins: 🛠️ **Admin** → 📅 **Bookings** to turn booking on/off for the channel and change the booked slot length (default 15 min) and the cooldown.
