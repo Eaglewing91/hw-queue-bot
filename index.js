@@ -73,8 +73,10 @@ const DEFAULTS = {
   book: num(process.env.BOOK_MINUTES, 15),       // length of a booked slot, minutes
   bookcool: num(process.env.BOOK_COOLDOWN_MINUTES, 60), // after a booked slot, wait this long before the next booked start (0 = off)
   bookkeep: num(process.env.BOOK_KEEP_WEAPONS, 1), // weapons never bookable at the same time, so the queue keeps moving (0 = all bookable)
+  bookmin: num(process.env.BOOK_MIN_AHEAD_MINUTES, 60), // earliest booking: this many minutes from now
+  bookmax: num(process.env.BOOK_MAX_AHEAD_HOURS, 12),   // latest booking: this many hours from now
 };
-const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240], book: [5, 240], bookcool: [0, 1440], bookkeep: [0, 25] };
+const LIMITS = { slot: [1, 240], claim: [0.5, 30], warn: [0, 60], cleanup: [0, 3600], remind: [1, 240], book: [5, 240], bookcool: [0, 1440], bookkeep: [0, 25], bookmin: [0, 1440], bookmax: [1, 48] };
 const API_POLL_MS = Math.max(15, num(process.env.API_POLL_SECONDS, 30)) * 1000; // armoury log check interval
 const MIN = 60_000;
 // Members loan weapons to themselves here (the bot only links to it; it never loans anything).
@@ -472,8 +474,11 @@ const advancing = new Set();
 // would run into a booking are shortened to end at the booking time (or the weapon is held if
 // that would leave less than a few minutes). At least the channel's "weapons kept for the queue" (bookkeep) are never bookable at once,
 // so the walk-up queue always keeps moving.
-const BOOK_AHEAD_MIN = num(process.env.BOOK_MAX_AHEAD_MINUTES, 12 * 60); // book at most this far ahead
-const BOOK_SOONEST_MIN = num(process.env.BOOK_MIN_AHEAD_MINUTES, 60); // and no sooner than this from now
+// How far ahead people can book (per channel settings bookmin / bookmax).
+const aheadMin = (b) => cfg(b).bookmin;
+const aheadMax = (b) => cfg(b).bookmax * 60;
+const BOOK_STEP_MIN = 15; // start times are offered every 15 minutes, whatever the booking length
+const hrs = (m) => (m % 60 ? `${Math.floor(m / 60) ? `${Math.floor(m / 60)} h ` : ''}${m % 60} min` : `${m / 60} h`);
 const BOOK_MIN_SHORT = 5;       // don't start a queue turn shorter than this (minutes); hold the weapon
 const BOOK_EXPIRE_MIN = 60;     // a booking still unserved this long after its time is dropped
 const bookingsOn = (b) => !b?.bookingOff;
@@ -503,16 +508,16 @@ function slotFree(b, T, weapon, ignoreId) {
   return true;
 }
 
-// Start times someone can book now: on the slot grid (TCT), from 5 min ahead up to BOOK_AHEAD_MIN.
+// Start times someone can book now: every 15 min (TCT), between the channel's earliest and latest limits.
 // Earliest start a member may book, after the cooldown from their last booked slot.
 const coolUntil = (b, userId) => (cfg(b).bookcool ? (b.lastBooked?.[userId] || 0) + cfg(b).bookcool * MIN : 0);
 
 function bookableTimes(b, weapon, userId, ignoreId) {
-  const step = cfg(b).book * MIN;
+  const step = BOOK_STEP_MIN * MIN;
   const now = Date.now();
-  const earliest = Math.max(now + BOOK_SOONEST_MIN * MIN, coolUntil(b, userId));
+  const earliest = Math.max(now + Math.max(aheadMin(b), 5) * MIN, coolUntil(b, userId));
   const out = [];
-  for (let T = Math.ceil(earliest / step) * step; T <= now + BOOK_AHEAD_MIN * MIN && out.length < 50; T += step) {
+  for (let T = Math.ceil(earliest / step) * step; T <= now + aheadMax(b) * MIN && out.length < 100; T += step) {
     if (slotFree(b, T, weapon, ignoreId)) out.push(T);
   }
   return out;
@@ -1205,12 +1210,14 @@ function describeSettings(b) {
     `📅 Booked slot length: **${c.book} min**${mark('book')}`,
     `🧊 Booking cooldown: **${c.bookcool ? `${c.bookcool} min after a booked slot` : 'off'}**${mark('bookcool')}`,
     `🎃 Weapons kept for the queue: **${c.bookkeep}**${mark('bookkeep')}`,
+    `🗓️ Bookable from **${c.bookmin} min** to **${c.bookmax} h** ahead${mark('bookmin')}`,
   ].join('\n');
 }
 
 const SETTING_LABELS = {
   slot: 'Slot length (minutes)', claim: 'Time to claim (minutes)', warn: 'Warning (minutes)',
   cleanup: 'Clean-up delay (seconds)', remind: 'Return reminder (minutes)', book: 'Booking length (minutes)', bookcool: 'Booking cooldown (minutes)', bookkeep: 'Weapons kept for the queue',
+  bookmin: 'Earliest booking (minutes ahead)', bookmax: 'Latest booking (hours ahead)',
 };
 
 // changes: { key: number } to set, { key: null } to go back to the default, undefined = leave alone.
@@ -1233,6 +1240,7 @@ function opSettings(cid, changes = {}, reset = false) {
     next[k] = k === 'cleanup' || k === 'bookkeep' ? Math.round(v) : Math.round(v * 100) / 100;
   }
   const c = { ...DEFAULTS, ...next };
+  if (c.bookmin >= c.bookmax * 60) return { text: `The earliest booking (${c.bookmin} min) has to be sooner than the latest (${c.bookmax} h).` };
   if (c.warn >= c.slot || c.warn >= c.book) return { text: `The warning (${c.warn} min) has to be shorter than the slot and booking lengths.` };
   b.settings = next;
   save(cid);
@@ -1317,7 +1325,7 @@ async function bookInteraction(i) {
   const cool = coolUntil(b, i.user.id);
   const coolNote = cool > Date.now() ? `\n-# 🧊 Booking cooldown: your next booked slot can start from ${ts(cool)}.` : '';
   const head = `📅 **${moving ? 'Move your booking' : `Book a ${cfg(b).book}-min slot`}.** At your time you'll be tagged for the weapon, ahead of the queue.\n` +
-    `-# ${BOOK_SOONEST_MIN / 60} to ${BOOK_AHEAD_MIN / 60} hours ahead · 1 booking at a time · times are Torn City Time (TCT) · ` +
+    `-# ${hrs(aheadMin(b))} to ${hrs(aheadMax(b))} ahead · 1 booking at a time · times are Torn City Time (TCT) · ` +
     `loan it within ${cfg(b).claim} min or the booking is released` + coolNote;
   const wId = moving ? 'b_wm' : 'b_w';
   const tId = moving ? 'b_tm' : 'b_t';
@@ -1325,8 +1333,9 @@ async function bookInteraction(i) {
   if (id === 'p_book' || id === 'b_move') {
     const groups = new Map();
     for (const [, w] of byBonus(entries(b))) if (!groups.has(groupKey(w))) groups.set(groupKey(w), groupOf(b, w));
-    const opts = [{ label: 'Any weapon', value: 'any', description: 'First one free at your time (most times available)', emoji: { name: '🎲' } },
-      ...[...groups].slice(0, 24).map(([gk, grp]) => ({
+    // Members must pick a specific weapon (no "any weapon" bookings).
+    const opts = [
+      ...[...groups].slice(0, 25).map(([gk, grp]) => ({
         label: `${groupLabel(grp)}${grp.length > 1 ? ` ×${grp.length}` : ''}`.slice(0, 100), value: `g:${gk}`.slice(0, 100),
         description: grp.length > 1 ? 'Either copy' : undefined,
       }))];
@@ -1336,8 +1345,9 @@ async function bookInteraction(i) {
   }
   if (id === 'b_w' || id === 'b_wm') {
     const weapon = i.values[0];
+    if (weapon === 'any') return reply({ content: 'Please pick a specific weapon. Press **Book a slot** again.', components: [] });
     const times = bookableTimes(b, weapon, i.user.id, mine?.id);
-    if (!times.length) return reply({ content: `${head}\n\nNo free times for **${weapon === 'any' ? 'any weapon' : bookingLabel(b, { weapon })}** in the next ${BOOK_AHEAD_MIN / 60} hours.`, components: [] });
+    if (!times.length) return reply({ content: `${head}\n\nNo free times for **${weapon === 'any' ? 'any weapon' : bookingLabel(b, { weapon })}** in the next ${hrs(aheadMax(b))}.`, components: [] });
     const left = (T) => maxBookable(b) - bookingsOf(b).filter((x) => x.id !== mine?.id && Math.abs(x.at - T) < cfg(b).book * MIN).length;
     const opt = (T) => {
       const mins = Math.round((T - Date.now()) / MIN);
@@ -1345,16 +1355,16 @@ async function bookInteraction(i) {
       return { label: tct(T) + (mine && T === mine.at ? ' (current)' : ''), value: String(T), description: `${inTxt} · ${left(T)} bookable` };
     };
     // Discord allows 25 options per menu, so longer ranges are split into an earlier and a later menu.
-    const chunks = [times.slice(0, 25), times.slice(25, 50)].filter((c) => c.length);
-    const menus = chunks.map((c, n) => row(new StringSelectMenuBuilder().setCustomId(`${tId}${n ? '2' : ''}|${weapon}`.slice(0, 100))
-      .setPlaceholder(chunks.length > 1 ? `${n ? 'Later' : 'Earlier'} times: ${tct(c[0])} – ${tct(c[c.length - 1])}` : 'Pick a start time')
+    const chunks = [0, 25, 50, 75].map((n) => times.slice(n, n + 25)).filter((c) => c.length);
+    const menus = chunks.map((c, n) => row(new StringSelectMenuBuilder().setCustomId(`${tId}${n ? n + 1 : ''}|${weapon}`.slice(0, 100))
+      .setPlaceholder(chunks.length > 1 ? `Times ${tct(c[0])} – ${tct(c[c.length - 1])}` : 'Pick a start time')
       .addOptions(c.map(opt))));
     return reply({ content: `${head}\n\n**${weapon === 'any' ? 'Any weapon' : bookingLabel(b, { weapon })}**: pick a start time.`, components: menus });
   }
-  if (/^b_tm?2?\|/.test(id)) {
+  if (/^b_tm?[2-4]?\|/.test(id)) {
     const weapon = id.slice(id.indexOf('|') + 1);
     const T = Number(i.values[0]);
-    const okTime = T >= Date.now() + BOOK_SOONEST_MIN * MIN - 2 * MIN && T <= Date.now() + BOOK_AHEAD_MIN * MIN + MIN
+    const okTime = T >= Date.now() + aheadMin(b) * MIN - 2 * MIN && T <= Date.now() + aheadMax(b) * MIN + MIN
       && T >= coolUntil(b, i.user.id) - 1000 && slotFree(b, T, weapon, mine?.id);
     if (!okTime) return reply({ content: '⌛ That time was just taken. Press **Book a slot** again.', components: [] });
     let bk;
@@ -1729,7 +1739,7 @@ function bookAdminView(b, note) {
   return {
     content: (note ? `${note}\n\n` : '') + `📅 **Bookings in this channel: ${bookingsOn(b) ? 'on' : 'off'}** · ` +
       `🎃 **Walk-up queue: ${queueOn(b) ? 'on' : 'off (bookings only)'}**\n` +
-      `Booked slot length: **${cfg(b).book} min** · cooldown: **${cfg(b).bookcool ? `${cfg(b).bookcool} min` : 'off'}** · ${BOOK_SOONEST_MIN / 60}–${BOOK_AHEAD_MIN / 60} h ahead · 1 per member · ` +
+      `Booked slot length: **${cfg(b).book} min** · cooldown: **${cfg(b).bookcool ? `${cfg(b).bookcool} min` : 'off'}** · bookable ${hrs(aheadMin(b))} to ${hrs(aheadMax(b))} ahead · 1 per member · ` +
       `${cfg(b).bookkeep} weapon(s) always left for the queue (${maxBookable(b)} of ${entries(b).length} bookable at once)\n` +
       (upcoming.length ? upcoming.slice(0, 10).map((x) => `• ${tct(x.at)} · <@${x.userId}> · ${bookingLabel(b, x)}`).join('\n') : '-# No bookings yet.'),
     components: [row(
@@ -1961,6 +1971,8 @@ async function adminInteraction(i) {
         textInput('book', 'Booked slot length (minutes)', { required: false, max: 4, value: b.settings?.book, placeholder: `Blank = default (${DEFAULTS.book})` }),
         textInput('bookcool', 'Cooldown between bookings (minutes, 0 = off)', { required: false, max: 5, value: b.settings?.bookcool, placeholder: `Blank = default (${DEFAULTS.bookcool})` }),
         textInput('bookkeep', 'Weapons kept for the queue (0 = all bookable)', { required: false, max: 2, value: b.settings?.bookkeep, placeholder: `Blank = default (${DEFAULTS.bookkeep})` }),
+        textInput('bookmin', 'Earliest booking (minutes from now)', { required: false, max: 4, value: b.settings?.bookmin, placeholder: `Blank = default (${DEFAULTS.bookmin})` }),
+        textInput('bookmax', 'Latest booking (hours from now, max 48)', { required: false, max: 2, value: b.settings?.bookmax, placeholder: `Blank = default (${DEFAULTS.bookmax})` }),
       ]));
 
     case 'a_repost': {
@@ -1985,7 +1997,7 @@ async function adminInteraction(i) {
   }
   if (id === 'm_booklen') {
     const val = (k) => { const v = f(k).trim(); return v === '' ? null : Number(v); };
-    const r = opSettings(cid, { book: val('book'), bookcool: val('bookcool'), bookkeep: val('bookkeep') });
+    const r = opSettings(cid, { book: val('book'), bookcool: val('bookcool'), bookkeep: val('bookkeep'), bookmin: val('bookmin'), bookmax: val('bookmax') });
     return i.update(bookAdminView(board(cid), r.text.startsWith('⚙️') ? '⏱️ Booking settings updated.' : r.text));
   }
   if (id.startsWith('m_move|')) return adminDone(i, cid, opMove(cid, id.split('|')[1], Number(f('position').trim())));

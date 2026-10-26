@@ -201,7 +201,7 @@ Keys are never displayed, logged or readable back by anyone; they can only be re
 
 ## 📅 Booking a slot
 
-Members can press **📅 Book a slot** on the panel, pick **Any weapon** or a specific one, then a start time (Torn City Time, every 15 min, from 1 to 12 hours ahead).
+Members can press **📅 Book a slot** on the panel, pick a specific weapon, then a start time (Torn City Time, every 15 min, by default from 1 to 12 hours ahead; admins can change the earliest and latest per channel).
 
 - At their time they're tagged for that weapon **ahead of the queue** and loan it as usual (auto-claimed). Miss the claim window and the booking is released.
 - Queue turns that would run into a booking are cut short to end at the booking time; if that would leave under ~7 minutes, the weapon is held for the booking instead.
@@ -210,4 +210,4 @@ Members can press **📅 Book a slot** on the panel, pick **Any weapon** or a sp
 - **Cooldown:** after a booked slot, a member's next booked slot can't start until the cooldown has passed (default 60 min, 0 = off).
 - **Bookings only:** 🛠️ **Admin** → 📅 **Bookings** → 🎃 **Turn queue off** removes the walk-up queue from that channel. Every weapon becomes bookable and the panel only offers **Book a slot**.
 - The panel moves to the bottom of the channel whenever bookings are made, moved, cancelled or called up (as it does when queue positions change).
-- Admins: 🛠️ **Admin** → 📅 **Bookings** to turn booking on/off for the channel and change the booked slot length (default 15 min) and the cooldown.
+- Admins: 🛠️ **Admin** → 📅 **Bookings** to turn booking on/off for the channel and change the booked slot length (default 15 min), the cooldown, the weapons kept for the queue, and how soon / how far ahead people can book.
