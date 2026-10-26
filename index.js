@@ -880,7 +880,8 @@ function panelComponents(b) {
     new ActionRowBuilder().addComponents(
       ...(queueOn(b) ? [btn('p_join', 'Join queue', ButtonStyle.Success, '🎃').setDisabled(locked),
         btn('p_leave', 'Leave queue', ButtonStyle.Danger, '👋')] : []),
-      ...(bookingsOn(b) && maxBookable(b) > 0 ? [btn('p_book', 'Book a slot', ButtonStyle.Primary, '📅').setDisabled(locked)] : []),
+      ...(bookingsOn(b) && maxBookable(b) > 0 ? [btn('p_book', 'Book a slot', ButtonStyle.Primary, '📅').setDisabled(locked),
+        btn('p_allbook', 'View all bookings', ButtonStyle.Secondary, '🗓️')] : []),
     ),
     new ActionRowBuilder().addComponents(
       btn('p_done', 'Finished', ButtonStyle.Primary, '🏁'),
@@ -1278,6 +1279,7 @@ async function panelButton(i) {
       return i.reply({ ...eph(myStatus(cid, i.user.id)), ...(mine ? { components: [row(btn('b_move', 'Move booking', ButtonStyle.Primary, '🔁'), btn(`b_cancel|${mine.id}`, 'Cancel booking', ButtonStyle.Danger, '🗑️'))] } : {}) });
     }
     case 'p_book': return bookInteraction(i);
+    case 'p_allbook': return i.reply({ ...allBookingsView(board(cid), 0), flags: MessageFlags.Ephemeral });
     case 'p_name': {
       const input = new TextInputBuilder()
         .setCustomId('torn_name')
@@ -1295,12 +1297,51 @@ async function panelButton(i) {
 }
 
 // Buttons on turn messages: claim|key|userId, pass|key|userId, done|key|userId
+// Every booking in the channel, grouped by weapon, split into pages that fit a Discord message.
+function allBookingsView(b, page = 0) {
+  if (!b) return { content: NO_BOARD, components: [] };
+  const list = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
+  if (!list.length) return { content: '🗓️ **All bookings in this channel (0)**\nNo bookings yet. Every slot is free. 🕯️', components: [] };
+  const groups = new Map();
+  for (const bk of list) {
+    const label = bookingLabel(b, bk);
+    if (!groups.has(label)) groups.set(label, []);
+    groups.get(label).push(bk);
+  }
+  // Fill pages up to ~1700 characters; a weapon that runs onto the next page repeats its heading.
+  const pages = [];
+  let cur = '';
+  let curGroup = null;
+  for (const [label, bks] of groups) {
+    for (const [k, bk] of bks.entries()) {
+      const line = `${tct(bk.at)} · ${who(bk.userId)} · ${ts(bk.at)}`;
+      const heading = k === 0 ? `**${label}** (${bks.length})` : `**${label}** (cont.)`;
+      const add = (curGroup === label ? '' : `${cur ? '\n\n' : ''}${heading}\n`) + (curGroup === label ? `\n${line}` : line);
+      if (cur && (cur + add).length > 1700) {
+        pages.push(cur);
+        cur = `**${label}** (${k === 0 ? bks.length : 'cont.'})\n${line}`;
+      } else cur += add;
+      curGroup = label;
+    }
+  }
+  if (cur) pages.push(cur);
+  const n = Math.min(Math.max(0, page), pages.length - 1);
+  const head = `🗓️ **All bookings in this channel (${list.length})**${pages.length > 1 ? ` · page ${n + 1} of ${pages.length}` : ''}\n-# Times are TCT · only you can see this`;
+  return {
+    content: `${head}\n${pages[n]}`,
+    components: pages.length > 1 ? [row(
+      btn(`b_all|${n - 1}`, 'Previous', ButtonStyle.Secondary, '◀️').setDisabled(n === 0),
+      btn(`b_all|${n + 1}`, 'Next', ButtonStyle.Secondary, '▶️').setDisabled(n >= pages.length - 1))] : [],
+  };
+}
+
 async function bookInteraction(i) {
   const cid = i.channelId;
   const b = board(cid);
   const id = i.customId;
   const reply = (p) => (id === 'p_book' ? i.reply({ ...p, flags: MessageFlags.Ephemeral }) : i.update(p));
   if (!b) return reply({ content: NO_BOARD, components: [] });
+  if (id.startsWith('b_all|')) return i.update(allBookingsView(b, Number(id.split('|')[1]) || 0));
   if (id.startsWith('b_cancel|')) {
     const bk = bookingsOf(b).find((x) => x.id === id.split('|')[1]);
     if (!bk) return reply({ content: 'That booking is already gone.', components: [] });
@@ -1762,6 +1803,7 @@ function bookAdminView(b, note) {
         btn('a_queue_toggle', queueOn(b) ? 'Turn queue off (bookings only)' : 'Turn queue back on', queueOn(b) ? ButtonStyle.Secondary : ButtonStyle.Success, '🎃')),
       row(
         btn('a_book_len', 'Edit booking settings', ButtonStyle.Primary, '⏱️'),
+        btn('p_allbook', 'View all bookings', ButtonStyle.Secondary, '🗓️'),
         btn('a_back', 'Back', ButtonStyle.Secondary, '↩️')),
     ],
   };
