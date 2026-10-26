@@ -1651,9 +1651,9 @@ function adminMenu(b) {
     row(btn('a_addu', 'Add member', ButtonStyle.Secondary, '👤'),
       btn('a_rmu', 'Remove member', ButtonStyle.Secondary, '🚫').setDisabled(emptyQueue && noneHeld),
       btn('a_move', 'Move member', ButtonStyle.Secondary, '↕️').setDisabled(emptyQueue)),
-    row(btn('a_settings', 'Settings', ButtonStyle.Primary, '⚙️'),
+    row(btn('a_settings', 'Queue settings', ButtonStyle.Primary, '⚙️'),
       btn('a_keys', 'API keys', ButtonStyle.Secondary, '🔑'),
-      btn('a_book', bookingsOn(b) ? 'Bookings: on' : 'Bookings: off', bookingsOn(b) ? ButtonStyle.Success : ButtonStyle.Secondary, '📅'),
+      btn('a_book', 'Bookings & settings', ButtonStyle.Primary, '📅'),
       btn('a_repost', 'Re-post panel', ButtonStyle.Secondary, '📌')),
     row(btn('a_clear', 'Clear queue', ButtonStyle.Danger, '🧹').setDisabled(emptyQueue),
       btn('a_delete', 'Delete queue', ButtonStyle.Danger, '🪦')),
@@ -1736,18 +1736,34 @@ async function saveTrancheKey(fid, key, userId) {
 }
 
 function bookAdminView(b, note) {
+  const c = cfg(b);
   const upcoming = [...bookingsOf(b)].sort((x, y) => x.at - y.at);
+  const onOff = (v) => (v ? '🟢 On' : '🔴 Off');
+  const content = (note ? `${note}\n\n` : '') +
+    `📅 **Bookings & settings for this channel**\n\n` +
+    `**Status**\n` +
+    `• Bookings: **${onOff(bookingsOn(b))}**\n` +
+    `• Walk-up queue: **${queueOn(b) ? '🟢 On' : '🔴 Off (bookings only)'}**\n\n` +
+    `**Booking settings** · change with ⏱️ *Edit booking settings*\n` +
+    `• Booked slot length: **${c.book} min**\n` +
+    `• Cooldown between a member's bookings: **${c.bookcool ? `${c.bookcool} min` : 'off'}**\n` +
+    `• Earliest booking: **${queueOn(b) ? `${hrs(c.bookmin)} from now` : 'next 15-min start (bookings only)'}**\n` +
+    `• Latest booking: **${hrs(aheadMax(b))} from now**\n` +
+    `• Weapons kept for the queue: **${queueOn(b) ? c.bookkeep : 'n/a (bookings only)'}** · ${maxBookable(b)} of ${entries(b).length} weapon(s) bookable at once\n` +
+    `• 1 booking per member · start times every 15 min (TCT)\n\n` +
+    `**Upcoming bookings (${upcoming.length})**\n` +
+    (upcoming.length ? upcoming.slice(0, 10).map((x) => `• ${tct(x.at)} · <@${x.userId}> · ${bookingLabel(b, x)}`).join('\n') +
+      (upcoming.length > 10 ? `\n-# …and ${upcoming.length - 10} more` : '') : '-# None yet.');
   return {
-    content: (note ? `${note}\n\n` : '') + `📅 **Bookings in this channel: ${bookingsOn(b) ? 'on' : 'off'}** · ` +
-      `🎃 **Walk-up queue: ${queueOn(b) ? 'on' : 'off (bookings only)'}**\n` +
-      `Booked slot length: **${cfg(b).book} min** · cooldown: **${cfg(b).bookcool ? `${cfg(b).bookcool} min` : 'off'}** · bookable ${hrs(aheadMin(b))} to ${hrs(aheadMax(b))} ahead · 1 per member · ` +
-      `${cfg(b).bookkeep} weapon(s) always left for the queue (${maxBookable(b)} of ${entries(b).length} bookable at once)\n` +
-      (upcoming.length ? upcoming.slice(0, 10).map((x) => `• ${tct(x.at)} · <@${x.userId}> · ${bookingLabel(b, x)}`).join('\n') : '-# No bookings yet.'),
-    components: [row(
-      btn('a_book_toggle', bookingsOn(b) ? 'Turn bookings off' : 'Turn bookings on', bookingsOn(b) ? ButtonStyle.Danger : ButtonStyle.Success, '📅'),
-      btn('a_book_len', 'Booking settings', ButtonStyle.Secondary, '⏱️'),
-      btn('a_queue_toggle', queueOn(b) ? 'Turn queue off (bookings only)' : 'Turn queue back on', queueOn(b) ? ButtonStyle.Secondary : ButtonStyle.Success, '🎃')),
-      row(btn('a_back', 'Back', ButtonStyle.Secondary, '↩️'))],
+    content: content.slice(0, 1990),
+    components: [
+      row(
+        btn('a_book_toggle', bookingsOn(b) ? 'Turn bookings off' : 'Turn bookings on', bookingsOn(b) ? ButtonStyle.Danger : ButtonStyle.Success, '📅'),
+        btn('a_queue_toggle', queueOn(b) ? 'Turn queue off (bookings only)' : 'Turn queue back on', queueOn(b) ? ButtonStyle.Secondary : ButtonStyle.Success, '🎃')),
+      row(
+        btn('a_book_len', 'Edit booking settings', ButtonStyle.Primary, '⏱️'),
+        btn('a_back', 'Back', ButtonStyle.Secondary, '↩️')),
+    ],
   };
 }
 
