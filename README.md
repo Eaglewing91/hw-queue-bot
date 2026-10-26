@@ -201,7 +201,7 @@ Keys are never displayed, logged or readable back by anyone; they can only be re
 
 ## 📅 Booking a slot
 
-Members can press **📅 Book a slot** on the panel, pick a specific weapon, then a start time (Torn City Time, every 15 min, by default from 1 to 12 hours ahead; admins can change the earliest and latest per channel).
+Members can press **📅 Book a slot** on the panel, pick a specific weapon, then a start time (Torn City Time, every 15 min, by default from 1 to 12 hours ahead; admins can change the earliest and latest per channel; bookings-only channels have no earliest buffer).
 
 - At their time they're tagged for that weapon **ahead of the queue** and loan it as usual (auto-claimed). Miss the claim window and the booking is released.
 - Queue turns that would run into a booking are cut short to end at the booking time; if that would leave under ~7 minutes, the weapon is held for the booking instead.

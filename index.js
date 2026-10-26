@@ -475,7 +475,8 @@ const advancing = new Set();
 // that would leave less than a few minutes). At least the channel's "weapons kept for the queue" (bookkeep) are never bookable at once,
 // so the walk-up queue always keeps moving.
 // How far ahead people can book (per channel settings bookmin / bookmax).
-const aheadMin = (b) => cfg(b).bookmin;
+// The 'earliest booking' buffer protects people waiting in the queue, so bookings-only channels skip it.
+const aheadMin = (b) => (queueOn(b) ? cfg(b).bookmin : 0);
 const aheadMax = (b) => cfg(b).bookmax * 60;
 const BOOK_STEP_MIN = 15; // start times are offered every 15 minutes, whatever the booking length
 const hrs = (m) => (m % 60 ? `${Math.floor(m / 60) ? `${Math.floor(m / 60)} h ` : ''}${m % 60} min` : `${m / 60} h`);
@@ -1210,7 +1211,7 @@ function describeSettings(b) {
     `📅 Booked slot length: **${c.book} min**${mark('book')}`,
     `🧊 Booking cooldown: **${c.bookcool ? `${c.bookcool} min after a booked slot` : 'off'}**${mark('bookcool')}`,
     `🎃 Weapons kept for the queue: **${c.bookkeep}**${mark('bookkeep')}`,
-    `🗓️ Bookable from **${c.bookmin} min** to **${c.bookmax} h** ahead${mark('bookmin')}`,
+    `🗓️ Bookable from **${queueOn(b) ? `${c.bookmin} min` : 'the next 15-min start (bookings only)'}** to **${c.bookmax} h** ahead${mark('bookmin')}`,
   ].join('\n');
 }
 
