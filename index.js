@@ -441,6 +441,7 @@ function schedule(cid, key) {
     const warnMs = warnMin * MIN;
     if (warnMs > 0 && left > warnMs) {
       t.warn = setTimeout(async () => {
+        if (followOn(board(cid), key, h)) return; // their next booking follows on: no "time almost up"
         const m = await send(cid, `⏳ ${who(h.userId)}, ${warnMin} min left with **${gl(board(cid), w)}**. ${pick(SPOOK.warn)}`);
         if (m && w.holder === h) { h.extra.push(m.id); save(); }
       }, left - warnMs);
@@ -540,6 +541,14 @@ function planBookings(b, horizon) {
   return plan;
 }
 
+// A booking by the same member, for this weapon, that starts as their current turn ends:
+// back-to-back bookings become one longer turn instead of "return it" + "loan it again".
+function followOn(b, key, h) {
+  if (!b || !h || !isActive(h)) return null;
+  return bookingsOf(b).find((x) => x.userId === h.userId && bookingKeys(b, x).includes(key)
+    && x.at <= h.endsAt + 2 * MIN && x.at >= h.endsAt - cfg(b).book * MIN) || null;
+}
+
 // Hand weapon `key` to `userId` (a queue turn or a booking).
 async function callUp(cid, b, key, userId, extra = {}) {
   const w = b.weapons[key];
@@ -560,7 +569,11 @@ async function serveBookings(cid, b) {
   const now = Date.now();
   const list = bookingsOf(b);
   for (const bk of [...list].filter((x) => x.at <= now).sort((x, y) => x.at - y.at)) {
-    if (heldBy(b, bk.userId)) { b.bookings = list.filter((x) => x !== bk); save(cid); continue; } // already has a weapon
+    const holding = heldBy(b, bk.userId);
+    if (holding) {
+      if (followOn(b, holding[0], holding[1].holder) === bk) continue; // their current turn extends into it
+      b.bookings = bookingsOf(b).filter((x) => x !== bk); save(cid); continue; // already has a different weapon
+    }
     const key = byBonus(entries(b).filter(([k, w]) => !w.holder && bookingKeys(b, bk).includes(k)))[0]?.[0];
     if (!key) continue; // nothing free yet: first in line when one frees up
     b.bookings = bookingsOf(b).filter((x) => x !== bk);
@@ -637,6 +650,21 @@ async function endTurn(cid, key, reason) {
   const w = b?.weapons[key];
   if (!w?.holder) return;
   const h = w.holder;
+  // Back-to-back booking on the same weapon: keep the weapon and extend the turn.
+  const next = reason === 'time' ? followOn(b, key, h) : null;
+  if (next) {
+    b.bookings = bookingsOf(b).filter((x) => x !== next);
+    const len = cfg(b).book * MIN;
+    h.endsAt = Math.max(h.endsAt, next.at) + len;
+    h.booked = true;
+    delete h.capEnd;
+    (b.lastBooked ??= {})[h.userId] = h.endsAt; // cooldown runs from the end of the combined slot
+    h.quip = `🔁 Your next booking follows on, so keep the weapon. Turn extended to ${tctIn(h.endsAt)}.`;
+    save(cid);
+    schedule(cid, key);
+    await editMsg(cid, h.msgId, slotText(w, h, b), slotRow(key, h.userId));
+    return;
+  }
   const hadWeapon = isActive(h);
   w.holder = null;
   save(cid);
