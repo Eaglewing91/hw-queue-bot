@@ -46,7 +46,6 @@ Every bonus weapon in Torn, including ranked war weapons, has its own unique ID 
 - **A UID can only be registered once,** across all channels, so the same weapon can't be in two queues.
 - **With a Torn API key, the UID is enough.** Leave name, bonus and % blank and the bot fills them in from Torn. Without a key, enter them yourself as well.
 
-To find UIDs, use the **Torn Weapon UID Finder** userscript (`torn-weapon-uid-finder.user.js`). It lists each bonus weapon's UID on the faction armoury and Items pages you're viewing, with copy buttons.
 
 **Note:** the armoury log and armoury API name the weapon *type* ("Scythe"), not its UID. Loan checks confirm that the member loaned a Scythe, not which one. The UID on their turn message is what steers them to the right one.
 
