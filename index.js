@@ -38,7 +38,7 @@ const torn = require('./torn');
 const keys = require('./keys');
 // HW_QUEUE=off keeps the Halloween weapon queue asleep (panels, armoury checks, bookings) outside the event.
 const QUEUE_ACTIVE = String(process.env.HW_QUEUE || 'on').toLowerCase() !== 'off';
-const JOB_POLL_MS = Math.max(60, Number(process.env.JOB_POLL_SECONDS) || 180) * 1000;
+const JOB_POLL_MS = Math.max(60, Number(process.env.JOB_POLL_SECONDS) || 60) * 1000;
 
 // ---------- config ----------
 const TOKEN = process.env.DISCORD_TOKEN;

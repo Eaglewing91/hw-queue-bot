@@ -224,7 +224,7 @@ Watches the job-seekers forum thread ([15907925](https://www.torn.com/forums.php
 - `/jobfeed status` shows the settings and last check; `/jobfeed test` previews how the latest posts would be handled without posting anything.
 - Each notification shows the poster (name, ID, profile link), their working stats (total, and MAN/INT/END when given), their activity streak (current and best), when they were last active, the post text and a link to the post.
 - Stats are read from what people write in their post (e.g. "Total 82,500", "MAN 30k INT 27k END 25k", "160k working stats"). They are self-reported: the API doesn't show other players' working stats.
-- Admin only (same admin rules as the queue). Checks every 3 minutes.
+- Admin only (same admin rules as the queue). Checks every minute (1 API call, plus 2 per qualifying post).
 
 **Compliance:** only the official Torn API is used (forum > posts and public user data). No torn.com pages are loaded.
 
