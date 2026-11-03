@@ -86,12 +86,11 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
   // A Discord embed card: title, poster, stats / breakdown / activity in columns, the post, link buttons.
   async function describe(c, post, stats) {
     const high = !!stats && stats.total >= c.ping;
-    const fields = [
-      { name: 'Working stats', value: stats ? `**${fmt(stats.total)}**` : "⚠️ Couldn't read", inline: true },
-    ];
-    if (stats && (stats.man || stats.int || stats.end)) {
-      fields.push({ name: 'Breakdown', value: ['man', 'int', 'end'].filter((k) => stats[k]).map((k) => `${k.toUpperCase()} ${fmt(stats[k])}`).join('\n'), inline: true });
-    }
+    // One "Working stats" list: MAN / INT / END (when given), then the total.
+    const statLines = stats
+      ? [...['man', 'int', 'end'].filter((k) => stats[k]).map((k) => `${k.toUpperCase()}: ${fmt(stats[k])}`), `**Total: ${fmt(stats.total)}**`]
+      : ["⚠️ Couldn't read"];
+    const fields = [{ name: 'Working stats', value: statLines.join('\n'), inline: true }];
     // Activity streak and last action (public, one or two extra API calls).
     try {
       const a = await torn.playerActivity(post.authorId);
@@ -99,7 +98,6 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
         const dot = a.status === 'Online' ? '🟢' : a.status === 'Idle' ? '🟡' : '⚫';
         const v = [
           a.streak != null ? `🔥 ${fmt(a.streak)}-day streak` : null,
-          a.bestStreak != null ? `Best ${fmt(a.bestStreak)} days` : null,
           a.lastAction ? `${dot} ${ago(a.lastAction)}` : null,
         ].filter(Boolean).join('\n');
         if (v) fields.push({ name: 'Activity', value: v, inline: true });
