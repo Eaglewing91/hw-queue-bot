@@ -33,8 +33,12 @@ const {
   ButtonStyle, MessageFlags, ModalBuilder, TextInputBuilder, TextInputStyle,
   StringSelectMenuBuilder, UserSelectMenuBuilder,
 } = require('discord.js');
+const { createJobFeed } = require('./jobs');
 const torn = require('./torn');
 const keys = require('./keys');
+// HW_QUEUE=off keeps the Halloween weapon queue asleep (panels, armoury checks, bookings) outside the event.
+const QUEUE_ACTIVE = String(process.env.HW_QUEUE || 'on').toLowerCase() !== 'off';
+const JOB_POLL_MS = Math.max(60, Number(process.env.JOB_POLL_SECONDS) || 180) * 1000;
 
 // ---------- config ----------
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -1030,7 +1034,73 @@ const commands = [
       .addNumberOption((o) => o.setName('return_remind_minutes').setDescription('API only: remind if not returned this long after the slot (default 5)')
         .setMinValue(LIMITS.remind[0]).setMaxValue(LIMITS.remind[1]))
       .addBooleanOption((o) => o.setName('reset').setDescription('Reset this channel back to the defaults'))),
+  new SlashCommandBuilder().setName('jobfeed').setDescription('Job-seekers forum feed (admins)')
+    .addSubcommand((s) => s.setName('here').setDescription('Post job seekers from the forum thread in this channel (starts from now)'))
+    .addSubcommand((s) => s.setName('off').setDescription('Stop the job-seekers feed'))
+    .addSubcommand((s) => s.setName('status').setDescription('Show the feed settings and last check'))
+    .addSubcommand((s) => s.setName('test').setDescription('Preview how the latest posts would be handled (nothing is posted)'))
+    .addSubcommand((s) => s.setName('settings').setDescription('Change the criteria (leave blank to keep)')
+      .addIntegerOption((o) => o.setName('min').setDescription('Post seekers with at least this many working stats (default 50,000)').setMinValue(0))
+      .addIntegerOption((o) => o.setName('ping').setDescription('Also ping the role at or above this many (default 150,000)').setMinValue(0))
+      .addRoleOption((o) => o.setName('role').setDescription('Role to ping (default: any role named "director")'))
+      .addBooleanOption((o) => o.setName('unreadable').setDescription("Also post seekers whose stats can't be read"))
+      .addIntegerOption((o) => o.setName('thread').setDescription('Forum thread ID (default 15907925)').setMinValue(1))),
 ].map((c) => c.toJSON());
+
+// ---------- 💼 job-seekers feed ----------
+async function sendWithRoles(cid, content, { roles = [] } = {}) {
+  try {
+    const ch = await chan(cid);
+    return await ch.send({ content, allowedMentions: { parse: [], roles }, flags: MessageFlags.SuppressEmbeds });
+  } catch (err) { console.error(`Job feed post failed in ${cid}:`, err.message); }
+}
+const jobs = createJobFeed({
+  getState: () => state, save: () => save(), torn, send: sendWithRoles,
+  guildOf: (cid) => client.channels?.cache?.get?.(cid)?.guild,
+});
+function jobStatusText() {
+  const c = jobs.cfg();
+  const f = (n) => Number(n).toLocaleString('en-GB');
+  return `💼 **Job-seekers feed: ${c.enabled && c.channelId ? `🟢 on in <#${c.channelId}>` : '🔴 off'}**\n` +
+    `• Thread: [${c.threadId}](${jobs.threadUrl(c)})\n` +
+    `• Post seekers with **${f(c.min)}+** working stats · ping ${c.roleId ? `<@&${c.roleId}>` : 'the "director" role'} at **${f(c.ping)}+**\n` +
+    `• Posts with unreadable stats: **${c.unreadable ? 'posted' : 'skipped'}**\n` +
+    `• Checked every ${JOB_POLL_MS / 60000} min · last check ${c.lastOkAt ? `<t:${Math.floor(c.lastOkAt / 1000)}:R>` : 'not yet'}` +
+    `${c.lastError ? ` · ⚠️ ${c.lastError}` : ''} · posted so far: ${c.posted || 0}\n` +
+    (torn.enabled() ? '' : '⚠️ Needs the bot owner\'s Torn API key (TORN_API_KEY).');
+}
+async function jobCommand(i) {
+  if (!isAdmin(i)) return i.reply(eph(ADMIN_ONLY));
+  const sub = i.options.getSubcommand();
+  const c = jobs.cfg();
+  if (sub === 'here') {
+    Object.assign(c, { enabled: true, channelId: i.channelId, startedAt: Math.floor(Date.now() / 1000), lastTime: Math.floor(Date.now() / 1000), seen: [] });
+    save();
+    return i.reply(eph(`✅ New job-seeker posts will appear in this channel from now on.\n\n${jobStatusText()}`));
+  }
+  if (sub === 'off') { c.enabled = false; save(); return i.reply(eph(`🔴 Job-seekers feed stopped.\n\n${jobStatusText()}`)); }
+  if (sub === 'status') return i.reply(eph(jobStatusText()));
+  if (sub === 'settings') {
+    const min = i.options.getInteger('min'); const ping = i.options.getInteger('ping');
+    const role = i.options.getRole?.('role'); const unreadable = i.options.getBoolean('unreadable');
+    const thread = i.options.getInteger('thread');
+    if (min !== null) c.min = min;
+    if (ping !== null) c.ping = ping;
+    if (role) c.roleId = role.id;
+    if (unreadable !== null) c.unreadable = unreadable;
+    if (thread !== null && thread !== c.threadId) Object.assign(c, { threadId: thread, seen: [], lastTime: Math.floor(Date.now() / 1000), startedAt: Math.floor(Date.now() / 1000) });
+    save();
+    return i.reply(eph(`⚙️ Updated.\n\n${jobStatusText()}`));
+  }
+  if (sub === 'test') {
+    if (!torn.enabled()) return i.reply(eph('⚠️ Needs the bot owner\'s Torn API key (TORN_API_KEY).'));
+    await i.deferReply({ flags: MessageFlags.Ephemeral });
+    try {
+      const lines = await jobs.preview(10);
+      return i.editReply(`🔎 **Latest ${lines.length} posts in the thread** (nothing posted):\n${lines.join('\n')}`.slice(0, 1990));
+    } catch (err) { return i.editReply(`❌ ${torn.explain(err)}`); }
+  }
+}
 
 async function autocomplete(i) {
   const b = board(i.channelId);
@@ -2133,6 +2203,15 @@ client.once(Events.ClientReady, async (c) => {
   if (GUILD_ID) ids.add(GUILD_ID);
   for (const gid of ids) await registerCommands(c, gid);
   booted = true;
+  // Job-seekers feed runs whether or not the Halloween queue is active.
+  setInterval(() => jobs.poll().catch((e) => console.error(e)), JOB_POLL_MS);
+  const jc = jobs.cfg();
+  console.log(`💼 Job feed: ${jc.enabled && jc.channelId ? `on (thread ${jc.threadId}, ${jc.min}+ posted, ${jc.ping}+ pinged)` : 'off'}`);
+  if (!QUEUE_ACTIVE) {
+    console.log('🎃 Halloween queue is switched off (HW_QUEUE=off): panels, armoury checks and bookings are asleep.');
+    console.log(`💀 The Necromancer has risen: logged in as ${c.user.tag}`);
+    return;
+  }
   for (const cid of Object.keys(state.boards)) {
     await sweepOrphans(cid);
     for (const key of Object.keys(state.boards[cid].weapons)) {
@@ -2184,6 +2263,10 @@ client.on(Events.InteractionCreate, async (i) => {
       return await i.reply(eph('🔄 The Necromancer is restarting for an update. Try again in a few seconds.')).catch(() => {});
     }
     if (i.isAutocomplete()) return await autocomplete(i);
+    if (i.isChatInputCommand() && i.commandName === 'jobfeed') return await jobCommand(i);
+    if (!QUEUE_ACTIVE && (i.isChatInputCommand() || /^(p_|a_|b_|m_|claim|pass|done)/.test(i.customId || ''))) {
+      return await i.reply(eph('🎃 The Halloween weapon queue is closed until next year.')).catch(() => {});
+    }
     if (i.isChatInputCommand()) return await command(i);
     const id = i.customId || '';
     const isAdminUi = id === 'p_admin' || id.startsWith('a_') || id === 'm_addw' || id === 'm_settings' || id === 'm_booklen' || id.startsWith('m_move|') || id.startsWith('m_key|');
@@ -2216,6 +2299,6 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 }
 
 // Test hook (only when HWQ_TEST is set): lets the offline test run an armoury check on demand.
-if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, advance, state: () => state };
+if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, advance, state: () => state, jobPoll: () => jobs.poll() };
 
 client.login(TOKEN);
