@@ -1048,10 +1048,11 @@ const commands = [
 ].map((c) => c.toJSON());
 
 // ---------- 💼 job-seekers feed ----------
-async function sendWithRoles(cid, content, { roles = [] } = {}) {
+// Job feed messages are embeds (cards), so link previews aren't suppressed here.
+async function sendWithRoles(cid, payload) {
   try {
     const ch = await chan(cid);
-    return await ch.send({ content, allowedMentions: { parse: [], roles }, flags: MessageFlags.SuppressEmbeds });
+    return await ch.send(payload);
   } catch (err) { console.error(`Job feed post failed in ${cid}:`, err.message); }
 }
 const jobs = createJobFeed({

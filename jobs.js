@@ -82,29 +82,43 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
     return r?.id || null;
   }
 
+  // A Discord embed card: title, poster, stats / breakdown / activity in columns, the post, link buttons.
   async function describe(c, post, stats) {
-    const lines = [];
-    const high = stats && stats.total >= c.ping;
-    const head = stats
-      ? `${high ? '🚨' : '💼'} **${high ? 'High-stat job seeker' : 'New job seeker'}:** [${post.authorName} [${post.authorId}]](${profileUrl(post.authorId)}) · **${fmt(stats.total)}** working stats`
-      : `💼 **New job seeker:** [${post.authorName} [${post.authorId}]](${profileUrl(post.authorId)}) · ⚠️ couldn't read their stats`;
-    lines.push(head);
+    const high = !!stats && stats.total >= c.ping;
+    const fields = [
+      { name: 'Working stats', value: stats ? `**${fmt(stats.total)}**` : "⚠️ Couldn't read", inline: true },
+    ];
     if (stats && (stats.man || stats.int || stats.end)) {
-      lines.push(['man', 'int', 'end'].filter((k) => stats[k]).map((k) => `${k.toUpperCase()} ${fmt(stats[k])}`).join(' · '));
+      fields.push({ name: 'Breakdown', value: ['man', 'int', 'end'].filter((k) => stats[k]).map((k) => `${k.toUpperCase()} ${fmt(stats[k])}`).join('\n'), inline: true });
     }
-    // Activity streak and last action (public, one extra API call).
+    // Activity streak and last action (public, one or two extra API calls).
     try {
       const a = await torn.playerActivity(post.authorId);
       if (a) {
-        const streak = a.streak != null ? `🔥 Activity streak: **${fmt(a.streak)} day${a.streak === 1 ? '' : 's'}**${a.bestStreak != null ? ` (best ${fmt(a.bestStreak)})` : ''}` : null;
-        const last = a.lastAction ? `${a.status === 'Online' ? '🟢' : a.status === 'Idle' ? '🟡' : '⚫'} last active ${ago(a.lastAction)}` : null;
-        if (streak || last) lines.push([streak, last].filter(Boolean).join(' · '));
+        const dot = a.status === 'Online' ? '🟢' : a.status === 'Idle' ? '🟡' : '⚫';
+        const v = [
+          a.streak != null ? `🔥 ${fmt(a.streak)}-day streak` : null,
+          a.bestStreak != null ? `Best ${fmt(a.bestStreak)} days` : null,
+          a.lastAction ? `${dot} ${ago(a.lastAction)}` : null,
+        ].filter(Boolean).join('\n');
+        if (v) fields.push({ name: 'Activity', value: v, inline: true });
       }
-    } catch { /* streak is a bonus; never block the post */ }
+    } catch { /* activity is a bonus; never block the post */ }
     const body = String(post.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
-    if (body) lines.push(`> ${body.length > 350 ? `${body.slice(0, 350)}…` : body}`);
-    lines.push(`[View post](${postUrl(c, post.id)}) · [Profile](${profileUrl(post.authorId)}) · posted ${ago(post.time)}`);
-    return { text: lines.join('\n'), high };
+    if (body) fields.push({ name: 'Their post', value: `> *${(body.length > 400 ? `${body.slice(0, 400)}…` : body).replace(/\*/g, '\\*')}*`, inline: false });
+    const embed = {
+      color: high ? 0xda373c : 0xff7518,
+      title: high ? '🚨 High-stat job seeker' : '💼 New job seeker',
+      author: { name: `${post.authorName} [${post.authorId}]`, url: profileUrl(post.authorId) },
+      fields,
+      footer: { text: 'Job-seekers thread · posted' },
+      timestamp: post.time ? new Date(post.time * 1000).toISOString() : undefined,
+    };
+    const components = [{ type: 1, components: [
+      { type: 2, style: 5, label: 'View post', url: postUrl(c, post.id) },
+      { type: 2, style: 5, label: 'Profile', url: profileUrl(post.authorId) },
+    ] }];
+    return { embed, components, high };
   }
 
   // Which posts qualify: min ≤ total; ping when total ≥ ping threshold.
@@ -125,9 +139,12 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
         changed = true;
         const stats = parseWorkStats(p.content);
         if (!qualifies(c, stats)) continue;
-        const { text, high } = await describe(c, p, stats);
+        const { embed, components, high } = await describe(c, p, stats);
         const role = high ? pingRole(c) : null;
-        await send(c.channelId, role ? `<@&${role}> ${text}` : text, { roles: role ? [role] : [] });
+        await send(c.channelId, {
+          content: role ? `<@&${role}> High-stat job seeker` : '',
+          embeds: [embed], components, allowedMentions: { parse: [], roles: role ? [role] : [] },
+        });
         c.posted = (c.posted || 0) + 1;
       }
       c.seen = c.seen.slice(-500);
