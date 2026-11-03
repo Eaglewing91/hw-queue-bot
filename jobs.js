@@ -73,6 +73,7 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
   const threadUrl = (c) => `https://www.torn.com/forums.php#/p=threads&f=${c.forumId}&t=${c.threadId}&b=0&a=0`;
   const postUrl = (c, id) => `${threadUrl(c)}&to=${id}`;
   const profileUrl = (id) => `https://www.torn.com/profiles.php?XID=${id}`;
+  const mailUrl = (id) => `https://www.torn.com/messages.php#/p=compose&XID=${id}`;
 
   // The ping role: the one chosen in settings, else any role with "director" in its name.
   function pingRole(c) {
@@ -115,8 +116,8 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
       timestamp: post.time ? new Date(post.time * 1000).toISOString() : undefined,
     };
     const components = [{ type: 1, components: [
-      { type: 2, style: 5, label: 'View post', url: postUrl(c, post.id) },
       { type: 2, style: 5, label: 'Profile', url: profileUrl(post.authorId) },
+      { type: 2, style: 5, label: 'Mail', url: mailUrl(post.authorId) },
     ] }];
     return { embed, components, high };
   }
