@@ -129,6 +129,59 @@ function findField(obj, names, depth = 0) {
   return null;
 }
 
+// ---------- job-seekers forum feed (public data, owner's key) ----------
+// Posts in one forum thread: [{ id, content, authorId, authorName, time, edited }]
+async function forumPosts(threadId, fromUnix) {
+  const json = await call(`/forum/${encodeURIComponent(threadId)}/posts`, {
+    striptags: 'true', sort: 'desc', limit: 100, from: fromUnix ? Math.floor(fromUnix) : undefined,
+  });
+  const raw = Array.isArray(json.posts) ? json.posts : Object.values(json.posts || {});
+  return raw.map((p) => {
+    const a = p.author || {};
+    return {
+      id: String(p.id),
+      content: String(p.content ?? ''),
+      authorId: Number(a.id ?? p.author_id ?? 0),
+      authorName: String(a.username ?? a.name ?? p.author_name ?? 'Unknown'),
+      time: Number(p.created_time ?? p.time ?? 0),
+      edited: !!p.is_edited,
+    };
+  }).filter((p) => p.id && p.authorId);
+}
+
+// A player's activity streak and last action (public). { streak, bestStreak, lastAction, status } or null.
+async function playerActivity(id) {
+  let streak = null; let bestStreak = null;
+  try {
+    const json = await call(`/user/${encodeURIComponent(id)}/personalstats`, { stat: 'activestreak,bestactivestreak' });
+    const list = Array.isArray(json.personalstats) ? json.personalstats : [];
+    for (const x of list) {
+      if (x?.name === 'activestreak') streak = Number(x.value);
+      if (x?.name === 'bestactivestreak') bestStreak = Number(x.value);
+    }
+    if (streak == null) {
+      const cur = findField(json, ['activestreak', 'current']);
+      const best = findField(json, ['bestactivestreak', 'best']);
+      if (cur != null) streak = Number(cur);
+      if (best != null) bestStreak = Number(best);
+    }
+  } catch {
+    try { // older API form
+      const json = await call(`${V1}/user/${encodeURIComponent(id)}`, { selections: 'personalstats', key: KEY });
+      const ps = json.personalstats || {};
+      if (ps.activestreak != null) streak = Number(ps.activestreak);
+      if (ps.bestactivestreak != null) bestStreak = Number(ps.bestactivestreak);
+    } catch { /* not available */ }
+  }
+  let lastAction = null; let status = null;
+  try {
+    const json = await call(`/user/${encodeURIComponent(id)}/profile`);
+    const la = findField(json, ['last_action']);
+    if (la && typeof la === 'object') { lastAction = Number(la.timestamp) || null; status = la.status || null; }
+  } catch { /* fine */ }
+  return streak == null && !lastAction ? null : { streak, bestStreak, lastAction, status };
+}
+
 // Look up a Torn user by Discord ID (or Torn ID). Returns { id, name } or null.
 async function lookupUser(discordOrTornId) {
   const json = await call(`/user/${encodeURIComponent(discordOrTornId)}/basic`, { striptags: 'true' });
@@ -233,4 +286,4 @@ function explain(err) {
   return hints[err?.code] || err?.message || String(err);
 }
 
-module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };
+module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, forumPosts, playerActivity, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };

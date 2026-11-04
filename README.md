@@ -210,3 +210,28 @@ Members can press **📅 Book a slot** on the panel, pick a specific weapon, the
 - **Bookings only:** 🛠️ **Admin** → 📅 **Bookings** → 🎃 **Turn queue off** removes the walk-up queue from that channel. Every weapon becomes bookable and the panel only offers **Book a slot**.
 - The panel moves to the bottom of the channel whenever bookings are made, moved, cancelled or called up (as it does when queue positions change).
 - Admins: 🛠️ **Admin** → 📅 **Bookings** to turn booking on/off for the channel and change the booked slot length (default 15 min), the cooldown, the weapons kept for the queue, and how soon / how far ahead people can book.
+
+
+## 💼 Job-seekers feed
+
+Watches the job-seekers forum thread ([15907925](https://www.torn.com/forums.php#/p=threads&f=46&t=15907925)) through the Torn API and posts qualifying job seekers in a Discord channel.
+
+- `/jobfeed here`: post new job seekers in this channel (from now on). `/jobfeed off` stops it.
+- Default criteria: **50,000+** total working stats are posted; **150,000+** also ping the "director" role.
+  Change with `/jobfeed settings min:… ping:… role:@… unreadable:true/false thread:…`.
+- `/jobfeed status` shows the settings and last check; `/jobfeed test` previews how the latest posts would be handled without posting anything.
+- Each notification shows the poster (name, ID, profile link), their working stats (total, and MAN/INT/END when given), their activity streak (current and best), when they were last active, the post text and a link to the post.
+- Stats are read from what people write in their post (e.g. "Total 82,500", "MAN 30k INT 27k END 25k", "160k working stats"). They are self-reported: the API doesn't show other players' working stats.
+- Admin only (same admin rules as the queue). Checks every minute (1 API call, plus 2 per qualifying post).
+
+**Compliance:** only the official Torn API is used (forum > posts and public user data). No torn.com pages are loaded.
+
+**Terms for the bot owner's key (job feed)**
+
+| | |
+|---|---|
+| Data Storage | Only locally: IDs of posts already handled, feed settings |
+| Data Sharing | Faction: qualifying posts are shown in the chosen Discord channel |
+| Purpose of Use | Public community tools: surface job seekers from a public forum thread |
+| Key Storage & Sharing | Stored (Railway variable) / Used only for automation |
+| Key Access Level | Public (forum > posts, user > personalstats, user > profile) |
