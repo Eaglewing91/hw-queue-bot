@@ -128,20 +128,24 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
     if (!c.enabled || !c.channelId || !torn.enabled() || busy) return;
     busy = true;
     try {
-      // Page forward from the last post we saw (Torn returns up to 100 per call).
+      // 1 call: how many posts the thread has now. Nothing new → done.
+      const info = await torn.forumThread(c.threadId);
+      if (!info) throw new Error('Could not read the thread');
+      if (c.lastCount != null && info.posts <= c.lastCount) { c.lastOkAt = Date.now(); c.lastError = null; return; }
+      // Fetch from just before where we left off (first run: the last 50 posts), up to 5 pages.
+      let offset = c.lastCount != null ? c.lastCount - 5 : info.posts - 100;
       let posts = [];
-      let from = (c.lastTime || Math.floor(Date.now() / 1000)) - 60;
-      for (let page = 0; page < 5; page++) {
-        const batch = await torn.forumPosts(c.threadId, from);
+      for (let page = 0; page < 5 && offset < info.posts; page++) {
+        const batch = await torn.forumPosts(c.threadId, { offset, limit: 100 });
+        if (!batch.length) break;
         posts.push(...batch);
-        if (batch.length < 100) break;
-        const newest = Math.max(...batch.map((p) => p.time));
-        if (!(newest > from)) break;
-        from = newest;
+        offset += batch.length;
       }
+      if (!posts.length) posts = await torn.forumPosts(c.threadId, { offset: Math.max(0, info.posts - 100), limit: 100 });
       posts = [...new Map(posts.map((p) => [p.id, p])).values()];
+      c.lastCount = info.posts;
       c.seen ??= [];
-      let changed = false;
+      let changed = true; // lastCount moved on
       for (const p of posts.sort((a, b) => a.time - b.time)) {
         if (c.seen.includes(p.id) || (c.startedAt && p.time < c.startedAt)) continue;
         c.seen.push(p.id);
@@ -172,21 +176,9 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
   // Preview what the bot would do with the latest posts (nothing is posted).
   async function preview(n = 10) {
     const c = cfg();
-    // Ask for recent posts (the thread is huge; without a start time Torn returns page 1).
-    let posts = [];
-    for (const days of [3, 14, 60]) {
-      let from = Math.floor(Date.now() / 1000) - days * 86400;
-      posts = [];
-      for (let page = 0; page < 20; page++) {
-        const batch = await torn.forumPosts(c.threadId, from);
-        posts.push(...batch);
-        if (batch.length < 100) break;
-        const newest = Math.max(...batch.map((p) => p.time));
-        if (!(newest > from)) break;
-        from = newest;
-      }
-      if (posts.length) break;
-    }
+    // The newest posts: read the thread's post count, then fetch the last page by position.
+    const info = await torn.forumThread(c.threadId);
+    let posts = info ? await torn.forumPosts(c.threadId, { offset: Math.max(0, info.posts - Math.max(n, 20)), limit: 100 }) : [];
     posts = [...new Map(posts.map((p) => [p.id, p])).values()].sort((a, b) => b.time - a.time).slice(0, n);
     return posts.map((p) => {
       const s = parseWorkStats(p.content);

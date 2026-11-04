@@ -131,9 +131,10 @@ function findField(obj, names, depth = 0) {
 
 // ---------- job-seekers forum feed (public data, owner's key) ----------
 // Posts in one forum thread: [{ id, content, authorId, authorName, time, edited }]
-async function forumPosts(threadId, fromUnix) {
+// Posts are paged by position: offset 0 is the thread's first post.
+async function forumPosts(threadId, { offset, limit = 100 } = {}) {
   const json = await call(`/forum/${encodeURIComponent(threadId)}/posts`, {
-    striptags: 'true', sort: 'desc', limit: 100, from: fromUnix ? Math.floor(fromUnix) : undefined,
+    striptags: 'true', limit, offset: offset != null ? Math.max(0, Math.floor(offset)) : undefined,
   });
   const raw = Array.isArray(json.posts) ? json.posts : Object.values(json.posts || {});
   return raw.map((p) => {
@@ -147,6 +148,14 @@ async function forumPosts(threadId, fromUnix) {
       edited: !!p.is_edited,
     };
   }).filter((p) => p.id && p.authorId);
+}
+
+// Thread info: { posts (count), lastPostTime } or null.
+async function forumThread(threadId) {
+  const json = await call(`/forum/${encodeURIComponent(threadId)}/thread`);
+  const t = json?.thread || json;
+  const posts = Number(t?.posts);
+  return Number.isFinite(posts) ? { posts, lastPostTime: Number(t.last_post_time) || null } : null;
 }
 
 // A player's activity streak and last action (public). { streak, bestStreak, lastAction, status } or null.
@@ -286,4 +295,4 @@ function explain(err) {
   return hints[err?.code] || err?.message || String(err);
 }
 
-module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, forumPosts, playerActivity, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };
+module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, forumPosts, forumThread, playerActivity, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };

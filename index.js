@@ -1075,7 +1075,7 @@ async function jobCommand(i) {
   const sub = i.options.getSubcommand();
   const c = jobs.cfg();
   if (sub === 'here') {
-    Object.assign(c, { enabled: true, channelId: i.channelId, startedAt: Math.floor(Date.now() / 1000), lastTime: Math.floor(Date.now() / 1000), seen: [] });
+    Object.assign(c, { enabled: true, channelId: i.channelId, startedAt: Math.floor(Date.now() / 1000), lastTime: Math.floor(Date.now() / 1000), seen: [], lastCount: null });
     save();
     return i.reply(eph(`✅ New job-seeker posts will appear in this channel from now on.\n\n${jobStatusText()}`));
   }
@@ -1089,7 +1089,7 @@ async function jobCommand(i) {
     if (ping !== null) c.ping = ping;
     if (role) c.roleId = role.id;
     if (unreadable !== null) c.unreadable = unreadable;
-    if (thread !== null && thread !== c.threadId) Object.assign(c, { threadId: thread, seen: [], lastTime: Math.floor(Date.now() / 1000), startedAt: Math.floor(Date.now() / 1000) });
+    if (thread !== null && thread !== c.threadId) Object.assign(c, { threadId: thread, seen: [], lastTime: Math.floor(Date.now() / 1000), startedAt: Math.floor(Date.now() / 1000), lastCount: null });
     save();
     return i.reply(eph(`⚙️ Updated.\n\n${jobStatusText()}`));
   }
