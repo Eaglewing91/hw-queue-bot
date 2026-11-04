@@ -128,7 +128,18 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
     if (!c.enabled || !c.channelId || !torn.enabled() || busy) return;
     busy = true;
     try {
-      const posts = await torn.forumPosts(c.threadId, c.lastTime ? c.lastTime - 60 : undefined);
+      // Page forward from the last post we saw (Torn returns up to 100 per call).
+      let posts = [];
+      let from = (c.lastTime || Math.floor(Date.now() / 1000)) - 60;
+      for (let page = 0; page < 5; page++) {
+        const batch = await torn.forumPosts(c.threadId, from);
+        posts.push(...batch);
+        if (batch.length < 100) break;
+        const newest = Math.max(...batch.map((p) => p.time));
+        if (!(newest > from)) break;
+        from = newest;
+      }
+      posts = [...new Map(posts.map((p) => [p.id, p])).values()];
       c.seen ??= [];
       let changed = false;
       for (const p of posts.sort((a, b) => a.time - b.time)) {
@@ -161,12 +172,28 @@ function createJobFeed({ getState, save, torn, send, guildOf }) {
   // Preview what the bot would do with the latest posts (nothing is posted).
   async function preview(n = 10) {
     const c = cfg();
-    const posts = (await torn.forumPosts(c.threadId)).sort((a, b) => b.time - a.time).slice(0, n);
+    // Ask for recent posts (the thread is huge; without a start time Torn returns page 1).
+    let posts = [];
+    for (const days of [3, 14, 60]) {
+      let from = Math.floor(Date.now() / 1000) - days * 86400;
+      posts = [];
+      for (let page = 0; page < 20; page++) {
+        const batch = await torn.forumPosts(c.threadId, from);
+        posts.push(...batch);
+        if (batch.length < 100) break;
+        const newest = Math.max(...batch.map((p) => p.time));
+        if (!(newest > from)) break;
+        from = newest;
+      }
+      if (posts.length) break;
+    }
+    posts = [...new Map(posts.map((p) => [p.id, p])).values()].sort((a, b) => b.time - a.time).slice(0, n);
     return posts.map((p) => {
       const s = parseWorkStats(p.content);
+      const snippet = String(p.content || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 70);
       const verdict = !s ? (c.unreadable ? '⚠️ unreadable → would post' : '⚪ unreadable → skipped')
         : s.total >= c.ping ? `🚨 ${fmt(s.total)} → post + ping` : s.total >= c.min ? `💼 ${fmt(s.total)} → post` : `⚪ ${fmt(s.total)} → below ${fmt(c.min)}, skipped`;
-      return `• ${p.authorName} [${p.authorId}] · ${verdict}`;
+      return `• ${p.authorName} [${p.authorId}] <t:${p.time}:R> · ${verdict}${s ? '' : `\n  -# "${snippet}${snippet.length >= 70 ? '…' : ''}"`}`;
     });
   }
 
