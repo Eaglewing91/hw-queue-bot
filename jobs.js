@@ -23,7 +23,9 @@ function num(raw) {
   return Number.isFinite(v) ? Math.round(v) : null;
 }
 
-const NUM = '(\\d[\\d.,\\s]*\\s*[kKmM]?)\\b';
+// A number: "39,519" "75 000" "82.5" "82.5k" "1.2m". A space only joins digit groups of exactly 3
+// ("75 000"), so "Total 39,519 10/10" reads as 39,519, not 3,951,910.
+const NUM = '(\\d{1,3}(?:[.,]\\d{3}|\\s\\d{3}(?!\\d))+(?:\\.\\d+)?\\s*[kKmM]?|\\d+(?:[.,]\\d+)?\\s*[kKmM]?)(?![\\d/])';
 const STAT = {
   man: new RegExp(`\\b(?:man(?:ual)?(?:\\s*lab(?:ou?r)?)?|ml)\\b\\s*[:=\\-–]?\\s*${NUM}`, 'i'),
   int: new RegExp(`\\b(?:int(?:el+igence|el+)?|intel)\\b\\s*[:=\\-–]?\\s*${NUM}`, 'i'),
@@ -52,6 +54,8 @@ function parseWorkStats(text) {
     if (SANE(v) && v >= 1000) { total = v; break; }
   }
   const sum = parts.man && parts.int && parts.end ? parts.man + parts.int + parts.end : null;
+  // Cross-check: if the three stats are given and the stated total is more than 5% off, trust the sum.
+  if (total && sum && Math.abs(total - sum) > sum * 0.05) return { total: sum, ...parts, how: 'sum' };
   if (total) return { total, ...parts, how: 'total' };
   if (sum) return { total: sum, ...parts, how: 'sum' };
   return null;
