@@ -223,6 +223,7 @@ Watches the job-seekers forum thread ([15907925](https://www.torn.com/forums.php
 - Each notification shows the poster (name, ID, profile link), their working stats (total, and MAN/INT/END when given), their activity streak (current and best), when they were last active, the post text and a link to the post.
 - Stats are read from what people write in their post (e.g. "Total 82,500", "MAN 30k INT 27k END 25k", "160k working stats"). They are self-reported: the API doesn't show other players' working stats.
 - Admin only (same admin rules as the queue). Checks every minute (1 API call, plus 2 per qualifying post).
+- **Keys:** the feed's calls take turns on the keys members have lent (see Pharmacy stock alerts below). With none lent, it uses the owner's `TORN_API_KEY` as before.
 
 **Compliance:** only the official Torn API is used (forum > posts and public user data). No torn.com pages are loaded.
 
@@ -235,3 +236,27 @@ Watches the job-seekers forum thread ([15907925](https://www.torn.com/forums.php
 | Purpose of Use | Public community tools: surface job seekers from a public forum thread |
 | Key Storage & Sharing | Stored (Railway variable) / Used only for automation |
 | Key Access Level | Public (forum > posts, user > personalstats, user > profile) |
+
+
+## 🩸 Pharmacy stock alerts
+
+Watches Empty Blood Bags and the four needles (Epinephrine, Melatonin, Serotonin, Tyrosine) in the pharmacy through the Torn API, and DMs members the moment an item they chose is back in stock.
+
+- `/pharmacyalerts` (any member): shows current stock and a menu to pick which items to be DMed about. Pick nothing to turn alerts off.
+- An alert is sent when an item goes from sold out to in stock. When it sells out again, the DM is edited to "sold out" so old alerts don't mislead.
+- Members must allow DMs from the server. The bot sends a test DM when alerts are turned on; members who can't be DMed are unsubscribed.
+- **Keys:** the checks run on API keys that members choose to lend from the `/pharmacyalerts` panel (**Lend a key**). Lent keys are used for **any bot feature that only needs Public access** (today: pharmacy alerts and the job-seekers feed), and lenders are told so before entering a key. Only **Public** keys are accepted. Keys are encrypted with `KEY_SECRET`, never shown to anyone, used for nothing that needs more than Public access, and can be removed by their lender at any time. A key that stops working is set aside and its lender is told by DM. The queue's tranche keys are never used for this, and the owner's `TORN_API_KEY` only joins in if `STOCK_USE_OWNER_KEY=on`.
+- **Minimum 5 keys:** alerts stay off until 5 working keys are lent (change with `STOCK_MIN_KEYS`), and pause again if the count drops below that. The target is 20 keys (`STOCK_TARGET_KEYS`); the panel shows the count against it, e.g. "Keys: 3 / 20 · alerts off until 5".
+- Checks every 2 seconds while alerts are on and anyone has picked an item. Each check is 1 API call covering every item, and the keys take turns (5 keys: about 6 calls a minute each; 20 keys: under 2). Change with `STOCK_POLL_SECONDS`, minimum 2.
+
+**Compliance:** only the official Torn API is used (torn > cityshops, key > info once when a key is lent). No torn.com pages are loaded and nothing is bought: buying stays manual.
+
+**Terms for lent keys (shown to the member before they enter a key)**
+
+| | |
+|---|---|
+| Data Storage | Only locally: last stock counts; each member's Discord ID, chosen items and lent key (encrypted), until removed |
+| Data Sharing | Faction: public forum posts and shop stock read with the key are shown in Discord. The key is shared with nobody |
+| Purpose of Use | Public community tools: any bot feature that only needs Public access (now: pharmacy restock alerts, job-seekers forum feed) |
+| Key Storage & Sharing | Stored / Used only for automation |
+| Key Access Level | Public (any Public selection; now torn > cityshops, forum > posts/thread, user > personalstats/profile) |

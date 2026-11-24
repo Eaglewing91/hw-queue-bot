@@ -132,10 +132,11 @@ function findField(obj, names, depth = 0) {
 // ---------- job-seekers forum feed (public data, owner's key) ----------
 // Posts in one forum thread: [{ id, content, authorId, authorName, time, edited }]
 // Posts are paged by position: offset 0 is the thread's first post.
-async function forumPosts(threadId, { offset, limit = 100 } = {}) {
+// Each of these uses the owner's key unless another key is given (a key lent to the bot).
+async function forumPosts(threadId, { offset, limit = 100, key } = {}) {
   const json = await call(`/forum/${encodeURIComponent(threadId)}/posts`, {
     striptags: 'true', limit, offset: offset != null ? Math.max(0, Math.floor(offset)) : undefined,
-  });
+  }, key || KEY);
   const raw = Array.isArray(json.posts) ? json.posts : Object.values(json.posts || {});
   return raw.map((p) => {
     const a = p.author || {};
@@ -151,18 +152,19 @@ async function forumPosts(threadId, { offset, limit = 100 } = {}) {
 }
 
 // Thread info: { posts (count), lastPostTime } or null.
-async function forumThread(threadId) {
-  const json = await call(`/forum/${encodeURIComponent(threadId)}/thread`);
+async function forumThread(threadId, key) {
+  const json = await call(`/forum/${encodeURIComponent(threadId)}/thread`, {}, key || KEY);
   const t = json?.thread || json;
   const posts = Number(t?.posts);
   return Number.isFinite(posts) ? { posts, lastPostTime: Number(t.last_post_time) || null } : null;
 }
 
 // A player's activity streak and last action (public). { streak, bestStreak, lastAction, status } or null.
-async function playerActivity(id) {
+async function playerActivity(id, key) {
+  key = key || KEY;
   let streak = null; let bestStreak = null;
   try {
-    const json = await call(`/user/${encodeURIComponent(id)}/personalstats`, { stat: 'activestreak,bestactivestreak' });
+    const json = await call(`/user/${encodeURIComponent(id)}/personalstats`, { stat: 'activestreak,bestactivestreak' }, key);
     const list = Array.isArray(json.personalstats) ? json.personalstats : [];
     for (const x of list) {
       if (x?.name === 'activestreak') streak = Number(x.value);
@@ -176,7 +178,7 @@ async function playerActivity(id) {
     }
   } catch {
     try { // older API form
-      const json = await call(`${V1}/user/${encodeURIComponent(id)}`, { selections: 'personalstats', key: KEY });
+      const json = await call(`${V1}/user/${encodeURIComponent(id)}`, { selections: 'personalstats', key }, key);
       const ps = json.personalstats || {};
       if (ps.activestreak != null) streak = Number(ps.activestreak);
       if (ps.bestactivestreak != null) bestStreak = Number(ps.bestactivestreak);
@@ -184,11 +186,37 @@ async function playerActivity(id) {
   }
   let lastAction = null; let status = null;
   try {
-    const json = await call(`/user/${encodeURIComponent(id)}/profile`);
+    const json = await call(`/user/${encodeURIComponent(id)}/profile`, {}, key);
     const la = findField(json, ['last_action']);
     if (la && typeof la === 'object') { lastAction = Number(la.timestamp) || null; status = la.status || null; }
   } catch { /* fine */ }
   return streak == null && !lastAction ? null : { streak, bestStreak, lastAction, status };
+}
+
+// ---------- city shop stock (public data, owner's key) ----------
+// Every item in every city shop, from one call: [{ id, name, stock, price, shop }].
+// The timestamp parameter asks the API for a fresh answer instead of a cached one.
+// Uses the owner's key unless another key is given (a key lent for pharmacy alerts).
+async function cityShops(key = KEY) {
+  const json = await call(`${V1}/torn/`, { selections: 'cityshops', key, timestamp: Math.floor(Date.now() / 1000) }, key);
+  const out = [];
+  for (const shop of Object.values(json?.cityshops || {})) {
+    const inv = shop?.inventory || {};
+    for (const [id, it] of Array.isArray(inv) ? inv.map((x) => [x?.id, x]) : Object.entries(inv)) {
+      if (!it?.name) continue;
+      const stock = Number(it.in_stock ?? it.stock ?? 0);
+      out.push({ id: Number(id), name: String(it.name), stock: Number.isFinite(stock) ? stock : 0, price: Number(it.price) || null, shop: String(shop.name || '') });
+    }
+  }
+  return out;
+}
+
+// A key's access level from its own info: 1 Public, 2 Minimal, 3 Limited, 4 Full. Null if it can't be told.
+// Throws if Torn rejects the key.
+async function keyLevel(key) {
+  const json = await call(`${V1}/key/`, { selections: 'info', key }, key);
+  const level = Number(findField(json, ['access_level']));
+  return Number.isFinite(level) && level > 0 ? level : null;
 }
 
 // Look up a Torn user by Discord ID (or Torn ID). Returns { id, name } or null.
@@ -295,4 +323,4 @@ function explain(err) {
   return hints[err?.code] || err?.message || String(err);
 }
 
-module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, forumPosts, forumThread, playerActivity, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };
+module.exports = { enabled, armouryNews, armouryNewsFor, keyFaction, factionName, userFaction, forumPosts, forumThread, playerActivity, cityShops, keyLevel, lookupUser, itemByUid, parseArmoury, sameName, sameItem, explain, TornError };

@@ -34,11 +34,13 @@ const {
   StringSelectMenuBuilder, UserSelectMenuBuilder,
 } = require('discord.js');
 const { createJobFeed } = require('./jobs');
+const { createStockAlerts, IDS: STOCK_IDS } = require('./stock');
 const torn = require('./torn');
 const keys = require('./keys');
 // HW_QUEUE=off keeps the Halloween weapon queue asleep (panels, armoury checks, bookings) outside the event.
 const QUEUE_ACTIVE = String(process.env.HW_QUEUE || 'on').toLowerCase() !== 'off';
 const JOB_POLL_MS = Math.max(60, Number(process.env.JOB_POLL_SECONDS) || 60) * 1000;
+const STOCK_POLL_MS = Math.max(2, Number(process.env.STOCK_POLL_SECONDS) || 2) * 1000;
 
 // ---------- config ----------
 const TOKEN = process.env.DISCORD_TOKEN;
@@ -1045,6 +1047,7 @@ const commands = [
       .addRoleOption((o) => o.setName('role').setDescription('Role to ping (default: any role named "director")'))
       .addBooleanOption((o) => o.setName('unreadable').setDescription("Also post seekers whose stats can't be read"))
       .addIntegerOption((o) => o.setName('thread').setDescription('Forum thread ID (default 15907925)').setMinValue(1))),
+  new SlashCommandBuilder().setName('pharmacyalerts').setDescription('Get a DM when pharmacy items are back in stock'),
 ].map((c) => c.toJSON());
 
 // ---------- 💼 job-seekers feed ----------
@@ -1055,8 +1058,16 @@ async function sendWithRoles(cid, payload) {
     return await ch.send(payload);
   } catch (err) { console.error(`Job feed post failed in ${cid}:`, err.message); }
 }
+// The feed's Torn calls take turns on keys members have lent (see stock.js); with none lent, the owner's key.
+const jobTorn = {
+  ...torn,
+  enabled: () => torn.enabled() || stock.keyCount() > 0,
+  forumThread: (id) => stock.borrow((key) => torn.forumThread(id, key)),
+  forumPosts: (id, opts = {}) => stock.borrow((key) => torn.forumPosts(id, { ...opts, key })),
+  playerActivity: (id) => stock.borrow((key) => torn.playerActivity(id, key)),
+};
 const jobs = createJobFeed({
-  getState: () => state, save: () => save(), torn, send: sendWithRoles,
+  getState: () => state, save: () => save(), torn: jobTorn, send: sendWithRoles,
   guildOf: (cid) => client.channels?.cache?.get?.(cid)?.guild,
 });
 function jobStatusText() {
@@ -1068,7 +1079,7 @@ function jobStatusText() {
     `• Posts with unreadable stats: **${c.unreadable ? 'posted' : 'skipped'}**\n` +
     `• Checked every ${JOB_POLL_MS / 60000} min · last check ${c.lastOkAt ? `<t:${Math.floor(c.lastOkAt / 1000)}:R>` : 'not yet'}` +
     `${c.lastError ? ` · ⚠️ ${c.lastError}` : ''} · posted so far: ${c.posted || 0}\n` +
-    (torn.enabled() ? '' : '⚠️ Needs the bot owner\'s Torn API key (TORN_API_KEY).');
+    (jobTorn.enabled() ? '' : '⚠️ Needs a Torn API key: a lent one (/pharmacyalerts) or TORN_API_KEY.');
 }
 async function jobCommand(i) {
   if (!isAdmin(i)) return i.reply(eph(ADMIN_ONLY));
@@ -1094,13 +1105,59 @@ async function jobCommand(i) {
     return i.reply(eph(`⚙️ Updated.\n\n${jobStatusText()}`));
   }
   if (sub === 'test') {
-    if (!torn.enabled()) return i.reply(eph('⚠️ Needs the bot owner\'s Torn API key (TORN_API_KEY).'));
+    if (!jobTorn.enabled()) return i.reply(eph('⚠️ Needs a Torn API key: a lent one (/pharmacyalerts) or TORN_API_KEY.'));
     await i.deferReply({ flags: MessageFlags.Ephemeral });
     try {
       const lines = await jobs.preview(10);
       return i.editReply(`🔎 **Latest ${lines.length} posts in the thread** (nothing posted):\n${lines.join('\n')}`.slice(0, 1990));
     } catch (err) { return i.editReply(`❌ ${torn.explain(err)}`); }
   }
+}
+
+// ---------- 🩸 pharmacy stock alerts (DMs to members who asked) ----------
+async function editDm(uid, mid, payload) {
+  try {
+    const ch = await client.users.createDM(uid);
+    return await ch.messages.edit(mid, payload);
+  } catch (err) { console.error(`Stock alert edit failed for ${uid}:`, err.message); }
+}
+const stock = createStockAlerts({
+  getState: () => state, save: () => save(), torn,
+  dm: (uid, payload) => client.users.send(uid, payload), editDm, vault: keys,
+  // The checks run on keys members lend for this. The owner's key only joins in if switched on.
+  useOwnerKey: /^(on|true|yes|1)$/i.test(String(process.env.STOCK_USE_OWNER_KEY || '')),
+  // Pharmacy alerts stay off until this many working keys are lent.
+  minKeys: Math.max(1, Number(process.env.STOCK_MIN_KEYS) || 5),
+  // The number of lent keys aimed for (shown on the panel).
+  targetKeys: Math.max(1, Number(process.env.STOCK_TARGET_KEYS) || 20),
+});
+// /pharmacyalerts: a private panel, open to every member.
+async function stockCommand(i) {
+  await i.deferReply({ flags: MessageFlags.Ephemeral });
+  return i.editReply(await stock.panel(i.user.id));
+}
+// Lending a key: terms first, then a pop-up for the key. The key is never shown or logged.
+async function stockKeys(i) {
+  const id = i.customId;
+  if (id === STOCK_IDS.lend) return i.reply({ ...stock.terms(), flags: MessageFlags.Ephemeral });
+  if (id === STOCK_IDS.add) {
+    return i.showModal(new ModalBuilder().setCustomId(STOCK_IDS.modal).setTitle('Lend an API key').addComponents(
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('key').setLabel('Torn API key (Public)')
+        .setStyle(TextInputStyle.Short).setMinLength(16).setMaxLength(16).setRequired(true))));
+  }
+  if (id === STOCK_IDS.modal) {
+    await i.deferReply({ flags: MessageFlags.Ephemeral });
+    return i.editReply(await stock.addKey(i.user.id, i.fields.getTextInputValue('key')));
+  }
+  if (id === STOCK_IDS.remove) {
+    await i.deferUpdate();
+    return i.editReply(await stock.panel(i.user.id, stock.removeKey(i.user.id)));
+  }
+}
+async function stockPick(i) {
+  await i.deferUpdate();
+  const note = await stock.choose(i.user.id, i.values);
+  return i.editReply(await stock.panel(i.user.id, note));
 }
 
 async function autocomplete(i) {
@@ -2206,6 +2263,8 @@ client.once(Events.ClientReady, async (c) => {
   booted = true;
   // Job-seekers feed runs whether or not the Halloween queue is active.
   setInterval(() => jobs.poll().catch((e) => console.error(e)), JOB_POLL_MS);
+  // So do the pharmacy stock alerts (1 API call per check, only while someone has alerts on).
+  setInterval(() => stock.poll().catch((e) => console.error(e)), STOCK_POLL_MS);
   const jc = jobs.cfg();
   console.log(`💼 Job feed: ${jc.enabled && jc.channelId ? `on (thread ${jc.threadId}, ${jc.min}+ posted, ${jc.ping}+ pinged)` : 'off'}`);
   if (!QUEUE_ACTIVE) {
@@ -2265,6 +2324,9 @@ client.on(Events.InteractionCreate, async (i) => {
     }
     if (i.isAutocomplete()) return await autocomplete(i);
     if (i.isChatInputCommand() && i.commandName === 'jobfeed') return await jobCommand(i);
+    if (i.isChatInputCommand() && i.commandName === 'pharmacyalerts') return await stockCommand(i);
+    if (i.isStringSelectMenu() && i.customId === STOCK_IDS.menu) return await stockPick(i);
+    if ([STOCK_IDS.lend, STOCK_IDS.add, STOCK_IDS.modal, STOCK_IDS.remove].includes(i.customId)) return await stockKeys(i);
     if (!QUEUE_ACTIVE && (i.isChatInputCommand() || /^(p_|a_|b_|m_|claim|pass|done)/.test(i.customId || ''))) {
       return await i.reply(eph('🎃 The Halloween weapon queue is closed until next year.')).catch(() => {});
     }
@@ -2300,6 +2362,6 @@ for (const sig of ['SIGTERM', 'SIGINT']) {
 }
 
 // Test hook (only when HWQ_TEST is set): lets the offline test run an armoury check on demand.
-if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, advance, state: () => state, jobPoll: () => jobs.poll() };
+if (process.env.HWQ_TEST) global.__hwq = { pollArmoury, advance, state: () => state, jobPoll: () => jobs.poll(), stockPoll: () => stock.poll() };
 
 client.login(TOKEN);
