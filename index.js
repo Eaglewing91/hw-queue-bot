@@ -1142,7 +1142,7 @@ async function stockKeys(i) {
   if (id === STOCK_IDS.lend) return i.reply({ ...stock.terms(), flags: MessageFlags.Ephemeral });
   if (id === STOCK_IDS.add) {
     return i.showModal(new ModalBuilder().setCustomId(STOCK_IDS.modal).setTitle('Lend an API key').addComponents(
-      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('key').setLabel('Torn API key (Public)')
+      new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('key').setLabel('Torn API key (Public is enough)')
         .setStyle(TextInputStyle.Short).setMinLength(16).setMaxLength(16).setRequired(true))));
   }
   if (id === STOCK_IDS.modal) {

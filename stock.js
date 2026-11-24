@@ -4,7 +4,8 @@
 // one call covers every item) and DMs the members who asked for an item the moment it comes
 // back in stock. It never loads torn.com pages and never buys anything: buying stays manual.
 //
-// The checks run on API keys that members choose to lend (a Public key is all it needs). Lent keys
+// The checks run on API keys that members choose to lend (a Public key is all it needs; keys with
+// more access are accepted, but only Public data is ever read with them). Lent keys
 // are encrypted before they're saved, never shown to anyone, and used only for what the lender is
 // told before entering one: any bot feature that only needs Public access (today: these stock checks
 // and the job-seekers forum feed). They are taken in turn so the calls are shared out between them.
@@ -84,9 +85,7 @@ function createStockAlerts({ getState, save, torn, dm, editDm, vault, useOwnerKe
     if (!vault.ready()) return "⚠️ Keys can't be saved yet (KEY_SECRET isn't set).";
     if (!/^[A-Za-z0-9]{16}$/.test(key)) return "⚠️ That doesn't look like a Torn API key (16 letters and numbers).";
     try {
-      const level = await torn.keyLevel(key);
-      if (level > 1) return '⚠️ Please lend a **Public** key. That one has more access than this needs, so it was not saved.';
-      await torn.cityShops(key);
+      await torn.cityShops(key); // any access level works: only Public data is ever read with it
     } catch (err) { return `⚠️ Torn didn't accept that key: ${torn.explain(err)}`; }
     cfg().keys[userId] = { enc: vault.encrypt(key), addedAt: Date.now(), status: 'ok' };
     save();
@@ -215,13 +214,13 @@ function createStockAlerts({ getState, save, torn, dm, editDm, vault, useOwnerKe
       content: [
         '**Lend an API key** (optional)',
         `Lent keys are used for **any bot feature that only needs Public access**, taking turns. Right now: pharmacy alerts and the job-seekers feed.`,
-        `Pharmacy alerts need ${minKeys} keys; the target is ${targetKeys}. Make a **Public** key just for this: Torn → Settings → API Keys.`,
+        `Pharmacy alerts need ${minKeys} keys; the target is ${targetKeys}. A **Public** key is all it needs (Torn → Settings → API Keys). Keys with more access work too, but only Public data is ever read.`,
         '',
         '**Data Storage:** Only locally: your Discord ID and your key (encrypted), until you remove it',
         '**Data Sharing:** Faction: public forum posts and shop stock read with the key are shown in Discord. Your key is shared with nobody',
         '**Purpose of Use:** Public community tools: any bot feature that only needs Public access (now: pharmacy restock alerts, job-seekers forum feed)',
         '**Key Storage & Sharing:** Stored / Used only for automation',
-        '**Key Access Level:** Public (any Public selection; now torn → cityshops, forum → posts/thread, user → personalstats/profile)',
+        '**Key Access Level:** Public (higher levels accepted; only Public selections are used: now torn → cityshops, forum → posts/thread, user → personalstats/profile)',
         '',
         '-# [Torn API terms](<https://www.torn.com/api.html>) · remove your key any time with /pharmacyalerts',
       ].join('\n'),
